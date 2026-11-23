@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 Theme.kt 亮色 background(0xFFF7F9FF) 一致：冷启动窗口底色即首帧底色 -->
+    <color name="window_bg">#FFF7F9FF</color>
+</resources>

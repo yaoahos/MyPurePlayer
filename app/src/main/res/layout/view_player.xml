@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  播放画面容器。
+
+  必须用 SurfaceView（surface_type=surface_view）：HDR10 / HLG 片源只有走这条
+  路径才能把 PQ / HLG 传递函数与色彩元数据交给系统合成器。TextureView 是
+  SurfaceTexture + GPU 采样，进 GL 时就被压成 SDR —— Android 文档明确要求
+  HDR 内容使用 SurfaceView。这台机器屏幕本身支持 HDR10 / HLG / HDR10+，
+  用 TextureView 等于把硬件能力丢掉。
+
+  代价与对策：SurfaceView 是独立硬件图层，不跟随 Compose 的 translationX。
+  所以**播放页的转场改成了淡入淡出**（见 AppNav 里 Routes.PLAYER 的
+  per-route transition）：alpha 走 SurfaceControl，SurfaceView 能正常参与，
+  不会出现"画面不动、背景滑走"的错位。
+
+  画中画：SurfaceView 在 PIP 窗口里是系统推荐做法（YouTube 同款）。
+  截帧：Playback.captureThumbnail 已有 PixelCopy 分支，SurfaceView 走这条。
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/player_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    app:surface_type="surface_view"
+    app:use_controller="false"
+    app:show_buffering="never"
+    app:resize_mode="fit" />

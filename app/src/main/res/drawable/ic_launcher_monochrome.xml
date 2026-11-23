@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 单色图层（Android 13 的「主题图标」用）。
+     系统只取这张图的 alpha 当遮罩、再染成主题色，所以这里必须是单色剪影，
+     而且不能是整块实心 —— 之前这里直接指向彩色的 ic_launcher_foreground，
+     整个圆盘区域都会被填满，主题图标上就是一个纯色圆片，三角完全消失。
+     现在画成「一圈环 + 一个三角」：与正常图标同一套识别特征，在单色下也认得出是播放器。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 圆环：线宽 4.6，半径 24，落在 66×66 的安全区内 -->
+    <path
+        android:pathData="M54,30 C67.3,30 78,40.7 78,54 C78,67.3 67.3,78 54,78 C40.7,78 30,67.3 30,54 C30,40.7 40.7,30 54,30 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="4.6"
+        android:fillColor="#00000000" />
+
+    <!-- 播放三角：与彩色图标的三角同一位置与大小（含第 10 版的 0.86 缩放） -->
+    <group
+        android:pivotX="55.2"
+        android:pivotY="54"
+        android:scaleX="0.86"
+        android:scaleY="0.86">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M43.4,41.4 L43.4,66.6 A2,2 0 0 0 46.5,68.3 L67.0,56.4 A2,2 0 0 0 67.0,51.6 L46.5,39.7 A2,2 0 0 0 43.4,41.4 Z" />
+    </group>
+</vector>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.MyPurePlayer" parent="android:Theme.Material.NoActionBar">
+        <!-- 与 Theme.kt 深色 background(0xFF0E1119) 一致：冷启动窗口底色即首帧底色 -->
+        <item name="android:windowBackground">#FF0E1119</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

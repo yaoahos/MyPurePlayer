@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用图标前景（第 10 版）：玻璃圆盘直径 54，播放三角按「视觉重心」居中。
+
+  第 9 版把圆盘从"实心蓝片 + 一块柔光"改成"一块有厚度的蓝玻璃"，
+  同时保证底板、圆盘、白三角三层各自读得清（用户第 24 轮的要求）。
+  玻璃感不能靠整片发白（第 8 版踩过：横贯亮带把蓝刷成奶白，像塑料老化），
+  只能靠三样能同时存在、互不吞并的东西：
+    · 左上角的**窗反光**（一块斜向椭圆亮斑）——玻璃最认得出的信号；
+    · 贴着内缘的上左亮弧（把同一个"上沿月牙"整体转 -45° 得到，两端自然收尖，
+      所以不会有硬切）；
+    · 断面细边：同一圈上左上亮、右下暗，加对侧一道极淡的折光，读成"透光的材料"。
+  明暗对比也拉开了：顶部更亮、底部更深但仍是明确的蓝（#182C74），
+  这样圆盘下部不会和底板糊成一片。
+
+  第 10 版（2026-11-22）只动三角：整体缩到 0.86（留白更大、盘面玻璃感更足），
+  并从纯白改成玻璃片（上白下微冷的底色 + 左上主反光 + 细亮棱）。
+  底板外圈的玻璃边在 ic_launcher_background.xml。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 盘面底色：上受光、下沉积。底部保持可辨的蓝，不与黑色底背景混同 -->
+    <path android:pathData="M54,27 C68.9,27 81,39.1 81,54 C81,68.9 68.9,81 54,81 C39.1,81 27,68.9 27,54 C27,39.1 39.1,27 54,27 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="27"
+                android:endX="54"
+                android:endY="81">
+                <item android:offset="0" android:color="#FF5E8AFF" />
+                <item android:offset="0.34" android:color="#FF3362F0" />
+                <item android:offset="0.72" android:color="#FF2447CE" />
+                <!-- 末档从 #182C74 提到 #27459F：底下的内阴影与下沿暗边还要各压一次，
+                     原来三笔叠完底部落到 (9,17,44)，而当时的底板中心只有 (9,20,44) ——
+                     数值上几乎重合，圆盘下缘就"没有边"了。提亮后叠完仍有 100 左右的蓝。 -->
+                <item android:offset="1" android:color="#FF23469B" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 左上斜光：与界面玻璃片体同一角度，压到很淡，只负责"有光"不负责"发亮" -->
+    <group>
+        <clip-path android:pathData="M54,27 C68.9,27 81,39.1 81,54 C81,68.9 68.9,81 54,81 C39.1,81 27,68.9 27,54 C27,39.1 39.1,27 54,27 Z" />
+        <path android:pathData="M27,27h54v54h-54z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="30"
+                    android:startY="30"
+                    android:endX="70"
+                    android:endY="70">
+                    <item android:offset="0" android:color="#17FFFFFF" />
+                    <item android:offset="0.45" android:color="#06FFFFFF" />
+                    <item android:offset="1" android:color="#00FFFFFF" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- 上左亮弧：把"上沿月牙"整体转 -45° 贴到左上内缘。
+         月牙的两端本来就是尖的，所以这是一条两端渐隐的亮弧，不是一段有切口的环带。 -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-45">
+        <path android:pathData="M54,27 C68.9,27 81,39.1 81,54 C81,50.6 74,34.4 54,30.6 C34,34.4 27,50.6 27,54 C27,39.1 39.1,27 54,27 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="54"
+                    android:startY="27"
+                    android:endX="54"
+                    android:endY="40"
+                    android:startColor="#3EFFFFFF"
+                    android:centerColor="#16FFFFFF"
+                    android:endColor="#00FFFFFF" />
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- 窗反光：一块横向略长的椭圆亮斑，边缘靠 group 的纵向压缩做出柔和收束。
+         放在左上、避开三角（三角左边界 x=43.4），所以不会切到白色部分。 -->
+    <group
+        android:pivotX="38"
+        android:pivotY="38"
+        android:scaleY="0.67">
+        <path
+            android:pathData="M38,27.5 C43.8,27.5 48.5,32.2 48.5,38 C48.5,43.8 43.8,48.5 38,48.5 C32.2,48.5 27.5,43.8 27.5,38 C27.5,32.2 32.2,27.5 38,27.5 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="radial"
+                    android:centerX="38"
+                    android:centerY="38"
+                    android:gradientRadius="10.5">
+                    <item android:offset="0" android:color="#42FFFFFF" />
+                    <item android:offset="0.62" android:color="#14FFFFFF" />
+                    <item android:offset="1" android:color="#00FFFFFF" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- 聚光点：窗反光上方一颗更实的小高光，玻璃的"湿"就靠它 -->
+    <path android:pathData="M43,24.5 C47.7,24.5 51.5,28.3 51.5,33 C51.5,37.7 47.7,41.5 43,41.5 C38.3,41.5 34.5,37.7 34.5,33 C34.5,28.3 38.3,24.5 43,24.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="43"
+                android:centerY="33"
+                android:gradientRadius="8.5">
+                <item android:offset="0" android:color="#56FFFFFF" />
+                <item android:offset="0.5" android:color="#1AFFFFFF" />
+                <item android:offset="1" android:color="#00FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 底部内阴影：把盘面下半压暗，圆盘才有体积。但**只压到 0.24**。
+         这一笔连同下面的下沿暗边，原来分别是 0.32 与 0.44，两笔都乘黑，底部一路
+         沉到 (9,17,44)，与黑底 (9,20,44) 分不出来（用户第 25 轮：圆形中层下方
+         暗边与黑底颜色太近）。体积靠"上亮下暗"的相对关系给，不靠把底部压成黑。 -->
+    <group>
+        <clip-path android:pathData="M54,27 C68.9,27 81,39.1 81,54 C81,68.9 68.9,81 54,81 C39.1,81 27,68.9 27,54 C27,39.1 39.1,27 54,27 Z" />
+        <path android:pathData="M27,27h54v54h-54z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="54"
+                    android:startY="54"
+                    android:endX="54"
+                    android:endY="81">
+                    <item android:offset="0" android:color="#00000000" />
+                    <item android:offset="0.55" android:color="#16000000" />
+                    <item android:offset="1" android:color="#47000000" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- 断面细边（亮）：同一圈上左上亮、右下几乎为零 -->
+    <path
+        android:pathData="M54,27.7 C68.5,27.7 80.3,39.5 80.3,54 C80.3,68.5 68.5,80.3 54,80.3 C39.5,80.3 27.7,68.5 27.7,54 C27.7,39.5 39.5,27.7 54,27.7 Z"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="30"
+                android:startY="30"
+                android:endX="78"
+                android:endY="78">
+                <item android:offset="0" android:color="#62FFFFFF" />
+                <item android:offset="0.5" android:color="#30FFFFFF" />
+                <item android:offset="1" android:color="#0DFFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 断面细边（暗）：同一圈上右下压暗，与上面那条合成"上白下黑"的玻璃断面。
+         颜色史：纯黑 → 深蓝（与当时蓝黑底同色相，只剩亮度差）→ 深青 → 深靛紫
+         `#2A1E78`（底板还是蓝黑时，只能靠换色相把圆盘下缘从同色底里拉出来）。
+         第 14 版底板改为中性石墨灰后，紫在中性灰上会显成一圈淡紫晕（1024px 下很明显），
+         于是改回**中性暗灰 `#161A22`**：灰板与蓝盘之间本来就只要一道暗缝，
+         不再需要靠色相做区分。 -->
+    <path
+        android:pathData="M54,27.7 C68.5,27.7 80.3,39.5 80.3,54 C80.3,68.5 68.5,80.3 54,80.3 C39.5,80.3 27.7,68.5 27.7,54 C27.7,39.5 39.5,27.7 54,27.7 Z"
+        android:strokeWidth="1.4"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="30"
+                android:startY="30"
+                android:endX="78"
+                android:endY="78">
+                <item android:offset="0" android:color="#00000000" />
+                <item android:offset="0.55" android:color="#24161A22" />
+                <item android:offset="1" android:color="#52161A22" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 右下二次反光：玻璃把光折回来，落在对侧内缘。很淡的一条窄弧，
+         够读出"这是透光材料"，又不破坏上亮下暗的体积。 -->
+    <path android:pathData="M27,54 A27,27 0 0 0 81,54 L78.4,54 A24.4,24.4 0 0 1 29.6,54 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="27"
+                android:endX="54"
+                android:endY="54">
+                <item android:offset="0" android:color="#00000000" />
+                <item android:offset="1" android:color="#22FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 下沿暗边：一条 1.2 宽的月牙。用填充而不是描边——
+         描边在中线处两个端点对接，会留下一个 1px 的亮点，像玻璃磕了个小口。
+         与断面暗边同色（`#161A22`），alpha 略高：这一条落在圆盘最外侧，
+         负责在灰板上压出圆盘的底轮廓。 -->
+    <path android:pathData="M27,54 A27,27 0 0 0 81,54 L79.8,54 A25.8,25.8 0 0 1 28.2,54 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="54"
+                android:endX="54"
+                android:endY="81">
+                <item android:offset="0" android:color="#00000000" />
+                <item android:offset="0.4" android:color="#28161A22" />
+                <item android:offset="1" android:color="#60161A22" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 播放三角（第 10 版）：比上一版小一圈（整体 0.86），并从"纯白贴纸"
+         改成一片**玻璃**——底色上白下微冷、左上斜向主反光、一圈细亮棱。
+         整体缩放用 group 做：落影与三角一起缩，相对关系一点不动。
+         包围盒中心 55.2（圆心 54 右移 1.2 作光学补偿），缩放后高约 24.5、
+         宽约 20.3，圆内上下留白更大，玻璃片"浮"在盘面上的感觉更足。 -->
+    <group
+        android:pivotX="55.2"
+        android:pivotY="54"
+        android:scaleX="0.86"
+        android:scaleY="0.86">
+
+        <!-- 落影：偏移 1.4 的极淡暗影，让玻璃片浮在盘面而不是贴上去 -->
+        <group android:translateX="0.3" android:translateY="1.4">
+            <path
+                android:fillColor="#2B000A1E"
+                android:pathData="M43.4,41.4 L43.4,66.6 A2,2 0 0 0 46.5,68.3 L67.0,56.4 A2,2 0 0 0 67.0,51.6 L46.5,39.7 A2,2 0 0 0 43.4,41.4 Z" />
+        </group>
+
+        <!-- 玻璃片底色：上白 → 下微冷（#D9E4FA）。冷色只压到两成多，
+             整体仍读作白色，三角在任何主题下都清晰。 -->
+        <path
+            android:pathData="M43.4,41.4 L43.4,66.6 A2,2 0 0 0 46.5,68.3 L67.0,56.4 A2,2 0 0 0 67.0,51.6 L46.5,39.7 A2,2 0 0 0 43.4,41.4 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="46"
+                    android:startY="39.7"
+                    android:endX="62"
+                    android:endY="68.3">
+                    <item android:offset="0" android:color="#FFFFFFFF" />
+                    <item android:offset="0.42" android:color="#FFF4F8FF" />
+                    <item android:offset="1" android:color="#FFD9E4FA" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- 主反光：左上斜向的一片高光，裁在三角形状内。
+             与圆盘的窗反光同一角度，两个形状的光源方向一致才像同一个场景。 -->
+        <group>
+            <clip-path android:pathData="M43.4,41.4 L43.4,66.6 A2,2 0 0 0 46.5,68.3 L67.0,56.4 A2,2 0 0 0 67.0,51.6 L46.5,39.7 A2,2 0 0 0 43.4,41.4 Z" />
+            <path android:pathData="M41,37h28v34h-28z">
+                <aapt:attr name="android:fillColor">
+                    <gradient
+                        android:type="linear"
+                        android:startX="43.4"
+                        android:startY="39.7"
+                        android:endX="62"
+                        android:endY="66">
+                        <item android:offset="0" android:color="#5AFFFFFF" />
+                        <item android:offset="0.5" android:color="#10FFFFFF" />
+                        <item android:offset="1" android:color="#00FFFFFF" />
+                    </gradient>
+                </aapt:attr>
+            </path>
+        </group>
+
+        <!-- 细亮棱：玻璃片的断面。上左亮、右下几乎为零，与圆盘断面同一逻辑。 -->
+        <path
+            android:pathData="M43.4,41.4 L43.4,66.6 A2,2 0 0 0 46.5,68.3 L67.0,56.4 A2,2 0 0 0 67.0,51.6 L46.5,39.7 A2,2 0 0 0 43.4,41.4 Z"
+            android:strokeWidth="0.9"
+            android:strokeLineCap="round"
+            android:fillColor="#00000000">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="44"
+                    android:startY="40"
+                    android:endX="66"
+                    android:endY="68">
+                    <item android:offset="0" android:color="#A8FFFFFF" />
+                    <item android:offset="0.45" android:color="#24FFFFFF" />
+                    <item android:offset="1" android:color="#08FFFFFF" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

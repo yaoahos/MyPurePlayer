@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 检查更新下载下来的安装包放在这里，通过 FileProvider 交给系统安装器 -->
+    <cache-path
+        name="updates"
+        path="updates/" />
+</paths>

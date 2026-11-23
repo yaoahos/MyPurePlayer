@@ -1,0 +1,165 @@
+package com.yaoahos.mypureplayer.data
+
+import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+
+private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
+
+/** 设置项（只保留视频播放用得上的，音频/高级项一律不做） */
+data class AppSettings(
+    val darkMode: Int = 0, // 0 跟随系统 / 1 浅色 / 2 深色
+    /**
+     * 动态取色默认关闭：壁纸给的主色色相/饱和度不可控，玻璃面会随之漂移。
+     * 默认使用固定配色 [themePalette]，需要跟壁纸时再在设置里打开。
+     */
+    val dynamicColor: Boolean = false,
+    /** 固定主题色（见 ui.theme.ThemePalette），动态取色开启时被忽略 */
+    val themePalette: String = "blue",
+    val autoLoadSubtitle: Boolean = true,
+    val hardwareDecode: Boolean = true,
+    val autoPlayNext: Boolean = true,
+    val resumePlayback: Boolean = true,
+    /** 启动时检查更新（默认开启：只在发现新版本时弹窗，平时静默） */
+    val autoCheckUpdate: Boolean = true,
+    /** 上次自动检查更新的时间，用于节流 */
+    val lastUpdateCheck: Long = 0L,
+    /** 播放中回到桌面 / 切任务时自动开启小窗 */
+    val pipOnHome: Boolean = true,
+    /** 网络位置页的排列与排序（持久化，冷启动后保持） */
+    val networkGrid: Boolean = true,
+    val networkSort: String = "NAME",
+    val networkAscending: Boolean = true,
+    /** SMB 浏览页的排列与排序（持久化，冷启动后保持） */
+    val smbBrowserGrid: Boolean = true,
+    val smbBrowserSort: String = "NAME",
+    val smbBrowserAscending: Boolean = true,
+)
+
+class SettingsRepo(private val context: Context) {
+
+    private object Keys {
+        val darkMode = intPreferencesKey("dark_mode")
+        val dynamicColor = booleanPreferencesKey("dynamic_color")
+        val themePalette = stringPreferencesKey("theme_palette")
+        val autoSubtitle = booleanPreferencesKey("auto_subtitle")
+        val hwDecode = booleanPreferencesKey("hw_decode")
+        val autoNext = booleanPreferencesKey("auto_next")
+        val resume = booleanPreferencesKey("resume")
+        val autoCheckUpdate = booleanPreferencesKey("auto_check_update")
+        val lastUpdateCheck = longPreferencesKey("last_update_check")
+        val pipOnHome = booleanPreferencesKey("pip_on_home")
+        val networkGrid = booleanPreferencesKey("network_grid")
+        val networkSort = stringPreferencesKey("network_sort")
+        val networkAscending = booleanPreferencesKey("network_ascending")
+        val smbBrowserGrid = booleanPreferencesKey("smb_browser_grid")
+        val smbBrowserSort = stringPreferencesKey("smb_browser_sort")
+        val smbBrowserAscending = booleanPreferencesKey("smb_browser_ascending")
+    }
+
+    val settings: Flow<AppSettings> = context.settingsDataStore.data.map { prefs ->
+        AppSettings(
+            darkMode = prefs[Keys.darkMode] ?: 0,
+            dynamicColor = prefs[Keys.dynamicColor] ?: false,
+            themePalette = prefs[Keys.themePalette] ?: "blue",
+            autoLoadSubtitle = prefs[Keys.autoSubtitle] ?: true,
+            hardwareDecode = prefs[Keys.hwDecode] ?: true,
+            autoPlayNext = prefs[Keys.autoNext] ?: true,
+            resumePlayback = prefs[Keys.resume] ?: true,
+            autoCheckUpdate = prefs[Keys.autoCheckUpdate] ?: true,
+            lastUpdateCheck = prefs[Keys.lastUpdateCheck] ?: 0L,
+            pipOnHome = prefs[Keys.pipOnHome] ?: true,
+            networkGrid = prefs[Keys.networkGrid] ?: true,
+            networkSort = prefs[Keys.networkSort] ?: "NAME",
+            networkAscending = prefs[Keys.networkAscending] ?: true,
+            smbBrowserGrid = prefs[Keys.smbBrowserGrid] ?: true,
+            smbBrowserSort = prefs[Keys.smbBrowserSort] ?: "NAME",
+            smbBrowserAscending = prefs[Keys.smbBrowserAscending] ?: true,
+        )
+    }
+
+    /** 配置恢复：与导出一一对应，一次 edit 写完，避免每写一项目录就触发一次重组 */
+    suspend fun restore(s: ConfigBackup.BackupSettings) {
+        context.settingsDataStore.edit {
+            it[Keys.darkMode] = s.darkMode
+            it[Keys.dynamicColor] = s.dynamicColor
+            it[Keys.themePalette] = s.themePalette
+            it[Keys.autoSubtitle] = s.autoLoadSubtitle
+            it[Keys.hwDecode] = s.hardwareDecode
+            it[Keys.autoNext] = s.autoPlayNext
+            it[Keys.resume] = s.resumePlayback
+            it[Keys.autoCheckUpdate] = s.autoCheckUpdate
+            it[Keys.pipOnHome] = s.pipOnHome
+            it[Keys.networkGrid] = s.networkGrid
+            it[Keys.networkSort] = s.networkSort
+            it[Keys.networkAscending] = s.networkAscending
+            it[Keys.smbBrowserGrid] = s.smbBrowserGrid
+            it[Keys.smbBrowserSort] = s.smbBrowserSort
+            it[Keys.smbBrowserAscending] = s.smbBrowserAscending
+        }
+    }
+
+    suspend fun setDarkMode(value: Int) {
+        context.settingsDataStore.edit { it[Keys.darkMode] = value }
+    }
+
+    suspend fun setDynamicColor(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.dynamicColor] = value }
+    }
+
+    suspend fun setThemePalette(key: String) {
+        context.settingsDataStore.edit { it[Keys.themePalette] = key }
+    }
+
+    suspend fun setAutoLoadSubtitle(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.autoSubtitle] = value }
+    }
+
+    suspend fun setHardwareDecode(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.hwDecode] = value }
+    }
+
+    suspend fun setAutoPlayNext(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.autoNext] = value }
+    }
+
+    suspend fun setResumePlayback(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.resume] = value }
+    }
+
+    suspend fun setAutoCheckUpdate(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.autoCheckUpdate] = value }
+    }
+
+    suspend fun setLastUpdateCheck(value: Long) {
+        context.settingsDataStore.edit { it[Keys.lastUpdateCheck] = value }
+    }
+
+    suspend fun setPipOnHome(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.pipOnHome] = value }
+    }
+
+    suspend fun setNetworkLayout(grid: Boolean, sort: String, ascending: Boolean) {
+        context.settingsDataStore.edit {
+            it[Keys.networkGrid] = grid
+            it[Keys.networkSort] = sort
+            it[Keys.networkAscending] = ascending
+        }
+    }
+
+    suspend fun setSmbBrowserLayout(grid: Boolean, sort: String, ascending: Boolean) {
+        context.settingsDataStore.edit {
+            it[Keys.smbBrowserGrid] = grid
+            it[Keys.smbBrowserSort] = sort
+            it[Keys.smbBrowserAscending] = ascending
+        }
+    }
+}

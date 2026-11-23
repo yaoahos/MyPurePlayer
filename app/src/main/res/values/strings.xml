@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MyPurePlayer</string>
+
+    <string name="tab_local">本地</string>
+    <string name="tab_network">网络</string>
+    <string name="tab_play">播放</string>
+    <string name="tab_more">更多</string>
+
+    <!-- 系统媒体通知的渠道名（Android 8+ 在系统设置里可见） -->
+    <string name="notif_channel_playback">播放控制</string>
+</resources>

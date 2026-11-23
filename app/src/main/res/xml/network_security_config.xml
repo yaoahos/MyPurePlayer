@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      DLNA/UPnP 的设备描述（description.xml）与 AVTransport SOAP 控制都强制走
+      局域网明文 HTTP，无法用 HTTPS 替代；因此全局放行 cleartext。
+      检查更新仍走 HTTPS，SMB 走独立 TCP 445，不受此配置影响。
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+
+    <!--
+      本地视频播放走 127.0.0.1 的回环 HTTP 流（LocalStreamServer），
+      数据不出本机，单独放行明文，避免为了这一条而全局开 usesCleartextTraffic。
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
