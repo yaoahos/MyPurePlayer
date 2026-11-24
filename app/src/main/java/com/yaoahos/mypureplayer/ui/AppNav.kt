@@ -7,10 +7,17 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -24,12 +31,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.MaterialTheme
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
+import com.yaoahos.mypureplayer.ui.components.isDarkScheme
 import com.yaoahos.mypureplayer.ui.components.appGlassBar
+import com.yaoahos.mypureplayer.ui.components.appGlassSurface
+import com.yaoahos.mypureplayer.ui.components.glassPressable
+import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.AppOverlayHost
 import com.yaoahos.mypureplayer.ui.components.AppOverlayHostView
 import com.yaoahos.mypureplayer.ui.components.LocalAppOverlayHost
@@ -43,9 +55,6 @@ import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -383,20 +392,64 @@ private fun AppShell(tab: MainTab) {
         // 进文件夹 / 选择态时整条移除，不保留占位高度 —— 内容区直接铺到底，
         // 由页面自己的四宫格操作栏接管底部。
         if (!bottomBarHidden) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .background(barBackdrop)
-                    .shadow(
-                        elevation = 8.dp,
-                        shape = androidx.compose.ui.graphics.RectangleShape,
-                        clip = false,
-                        ambientColor = cs.primary.copy(alpha = 0.10f),
-                        spotColor = cs.primary.copy(alpha = 0.14f),
-                    )
-                    .appGlassBar(com.yaoahos.mypureplayer.ui.components.GlassEdge.TOP),
-            ) {
-                MainBottomBar(tab, navController)
+            // 横屏 / 平板（宽度 >= 600dp）：底栏不再是一条被"切短、贴底"的矩形 —— 那样
+            // 两侧突然断掉、又死死贴着屏幕底边，很丑。改成一条四边留白、大圆角的
+            // **悬浮玻璃长条**：本身收窄居中，看起来浮在背景之上，和弹窗同一种材质。
+            // 竖屏手机仍是原来的贴底满宽玻璃条（本就满宽，不触发限宽）。
+            val wide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 600
+            if (wide) {
+                Box(
+                    Modifier
+                        // 自绘行不再吸收系统手势区，这层 padding 把整条抬到手势横条上方，
+                        // 且落在玻璃**外面**，不会像之前那样在胶囊内部空出一截。
+                        .navigationBarsPadding()
+                        .align(Alignment.CenterHorizontally)
+                        // 先限宽再 fillMaxWidth：反了会被撑满整屏，widthIn(max) 收不回来。
+                        .widthIn(max = PageMetrics.SheetMaxWidth)
+                        .fillMaxWidth()
+                        // 四边留白是"悬浮"的关键：下方和左右都露出背景，条子才像浮着而不是贴边。
+                        // 上下留白对称（都是 10dp）——之前是 6/14，底部明显多一截空白。
+                        .padding(horizontal = 24.dp, vertical = 10.dp)
+                        // 悬浮感的最后一块：柔和投影。只给这条胶囊加，不给全站玻璃卡加 ——
+                        // 卡片底只有 66% 不透明，shadow 画在片体下面会透上来，形成那条
+                        // 「玻璃里多出来的一块直角矩形」。胶囊用 strong 玻璃（94~96% 不透明），
+                        // 又是真的浮在内容之上，正是阴影该出现的场合（和弹窗同一个道理）。
+                        // shadow 必须放在 padding **之后**：放在前面，它会以含留白的整块区域
+                        // 为形状，投出来的就是一圈矩形的影子，而不是胶囊自己的影子。
+                        .shadow(
+                            elevation = 11.dp,
+                            shape = RoundedCornerShape(28.dp),
+                            ambientColor = Color.Black.copy(alpha = if (cs.isDarkScheme()) 0.30f else 0.16f),
+                            spotColor = Color.Black.copy(alpha = if (cs.isDarkScheme()) 0.36f else 0.22f),
+                        )
+                        .appGlassSurface(
+                            shape = RoundedCornerShape(28.dp),
+                            strong = true,
+                        ),
+                ) {
+                    // 自绘的紧凑图标行（56dp），不再是 M3 NavigationBar 的 80dp +
+                    // 内部手势区 padding —— 那正是胶囊底部空白的根源。
+                    MainBottomBar(tab, navController)
+                }
+            } else {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(barBackdrop)
+                        .shadow(
+                            elevation = 8.dp,
+                            shape = androidx.compose.ui.graphics.RectangleShape,
+                            clip = false,
+                            ambientColor = cs.primary.copy(alpha = 0.10f),
+                            spotColor = cs.primary.copy(alpha = 0.14f),
+                        )
+                        .appGlassBar(com.yaoahos.mypureplayer.ui.components.GlassEdge.TOP)
+                        // 自绘紧凑行后，手势区不再由 M3 NavigationBar 内部吸收，
+                        // 这里显式补上，避免图标文字压到系统手势条。
+                        .navigationBarsPadding(),
+                ) {
+                    MainBottomBar(tab, navController)
+                }
             }
         }
     }
@@ -519,56 +572,59 @@ private fun MainBottomBar(
     current: MainTab,
     navController: NavHostController,
 ) {
-    // 底栏做成一条玻璃：半透明 + 内容侧高光边，滚动内容从它下面透过去。
-    // 材质由外层 Box 统一绘制（见 AppRoot），这里保持全透明，
-    // 两处都画会让 alpha 叠两层，变成一条死白色的实心带。
-    NavigationBar(
-        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+    // 自绘紧凑底栏，替掉 M3 NavigationBar。
+    //
+    // 为什么换掉：M3 NavigationBar 写死 80dp 高，内部还会把系统手势区的 padding
+    // 一起画进自己身体里。底栏做成悬浮胶囊后，那截手势区空白就落在玻璃**内部**，
+    // 顶部留白 ~20dp、底部却 ~41dp，明显不平衡（真机量过）。调外层 padding 没用，
+    // 因为多出来的高度在 NavigationBar 内部。自绘才能把高度与留白完全掌控。
+    //
+    // 现在：整行固定 56dp，上图标下文字、上下留白对称；每个 item 仍保留
+    // 选中态（图标+文字强调色、图标后一层淡胶囊）和全站统一的玻璃按压反馈。
+    // 手势区由外层容器负责（竖屏 Box 上显式 navigationBarsPadding），不再混进玻璃。
+    val accent = com.yaoahos.mypureplayer.ui.components.appGlass().accent
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        Modifier.fillMaxWidth().height(56.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         MainTab.entries.forEach { tab ->
             val selected = current == tab
-            // 选中的一处强调不够：光换颜色，在低饱和主题下只是"深一点的同一支蓝"。
-            // 现在三层叠加一起用 —— 强调色图标、强调色文字、图标后面一层 18% 的强调色胶囊；
-            // 文字再加一档字重。四者中任意一条看不清，剩下三条也能把"当前在哪一栏"说清楚。
-            val accent = com.yaoahos.mypureplayer.ui.components.appGlass().accent
-            NavigationBarItem(
-                selected = selected,
-                onClick = {
-                    if (current != tab) navigateToTab(navController, tab)
-                },
-                icon = {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .glassPressable { if (current != tab) navigateToTab(navController, tab) }
+                    .padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                // 选中时图标后面垫一层 accent 14% 胶囊（原来 M3 indicator 的效果），
+                // 没选中保持透明，占位不消失，切换时不会跳动。
+                Box(
+                    Modifier
+                        .size(width = 56.dp, height = 28.dp)
+                        .background(
+                            if (selected) accent.copy(alpha = 0.14f)
+                            else androidx.compose.ui.graphics.Color.Transparent,
+                            RoundedCornerShape(10.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Icon(
                         if (selected) tab.iconSelected else tab.icon,
                         contentDescription = stringResource(tab.labelRes),
+                        tint = if (selected) accent else muted,
                     )
-                },
-                label = {
-                    Text(
-                        stringResource(tab.labelRes),
-                        fontWeight = if (selected) androidx.compose.ui.text.font.FontWeight.SemiBold
-                        else androidx.compose.ui.text.font.FontWeight.Normal,
-                    )
-                },
-                // 选中态**不再三层同色**。
-                //
-                // 之前是：胶囊 18% 强调色 + 图标强调色 + 文字强调色。三者同一个色相、
-                // 同一个饱和度，叠在一起的结果是"一整块同色的东西"，边界反而消失了；
-                // 而标签只有 12sp，彩色小字压在彩色胶囊上，对比度从 4.4:1 掉到 3.8:1，
-                // 比未选中的灰字更难读 —— 用户问"会不会反而更不清晰"，答案是会。
-                //
-                // 现在把"颜色"只留给图标一处，文字回到高对比的 onSurface：
-                //   图标 = 强调色（唯一饱和色，视线第一落点）
-                //   胶囊 = 强调色 14%（很淡的一层"底"，只负责标出位置，不抢色）
-                //   文字 = onSurface + SemiBold（近黑/近白，12sp 也清楚）
-                // 三种信号各管一件事，不再互相抵消。
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = accent,
-                    selectedTextColor = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
-                    indicatorColor = accent.copy(alpha = 0.20f),
-                    unselectedIconColor = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                    unselectedTextColor = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-            )
+                }
+                Text(
+                    stringResource(tab.labelRes),
+                    color = if (selected) accent else muted,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = if (selected) androidx.compose.ui.text.font.FontWeight.SemiBold
+                    else androidx.compose.ui.text.font.FontWeight.Normal,
+                )
+            }
         }
     }
 }
@@ -790,15 +846,14 @@ private fun AppNavHost() {
         // 水平滑动会出现「背景滑走、画面钉在原地」的错位。alpha 走 SurfaceControl，
         // SurfaceView 能正常淡入淡出。
         //
-        // 用弹簧而不是 tween：本机 `MotionDurationScale ≈ 0.25`，`tween(220)` 实际只有
-        // 55ms，画面几乎是硬切。弹簧按物理时间走，不受这个系数影响，也是全软件其它
-        // 转场共用的那条曲线。
+        // 进出用 220/200ms tween：旧的弹簧尾部拖得太长，画面像"黏"在屏幕上；
+        // 早先"系统动画缩放会把 tween 压到 55ms"的判断已被慢放连拍证伪。
         composable(
             route = Routes.PLAYER,
-            enterTransition = { fadeIn(animationSpec = PageMotion.PageAlphaSpring) },
-            exitTransition = { fadeOut(animationSpec = PageMotion.PageAlphaSpring) },
-            popEnterTransition = { fadeIn(animationSpec = PageMotion.PageAlphaSpring) },
-            popExitTransition = { fadeOut(animationSpec = PageMotion.PageAlphaSpring) },
+            enterTransition = { fadeIn(animationSpec = PageMotion.PlayerFadeIn) },
+            exitTransition = { fadeOut(animationSpec = PageMotion.PlayerFadeOut) },
+            popEnterTransition = { fadeIn(animationSpec = PageMotion.PlayerFadeIn) },
+            popExitTransition = { fadeOut(animationSpec = PageMotion.PlayerFadeOut) },
         ) { PlayerScreen(navController) }
         composable(Routes.SETTINGS) { PageRoot { SettingsScreen(navController) } }
         composable(Routes.BACKUP) { PageRoot { BackupScreen(navController) } }

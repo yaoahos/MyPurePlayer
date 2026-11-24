@@ -14,6 +14,31 @@ import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
+/** 播放顺序：0 不连播 / 1 顺序 / 2 列表循环 / 3 单集循环 / 4 随机 */
+object PlayModes {
+    const val NO_AUTO = 0
+    const val SEQUENCE = 1
+    const val LOOP_ALL = 2
+    const val LOOP_ONE = 3
+    const val SHUFFLE = 4
+
+    fun label(mode: Int): String = when (mode) {
+        NO_AUTO -> "播完暂停"
+        LOOP_ALL -> "列表循环"
+        LOOP_ONE -> "单集循环"
+        SHUFFLE -> "随机播放"
+        else -> "顺序播放"
+    }
+
+    fun description(mode: Int): String = when (mode) {
+        NO_AUTO -> "每个视频播完就暂停"
+        LOOP_ALL -> "播完最后一集回到第一集"
+        LOOP_ONE -> "反复播放当前这一集"
+        SHUFFLE -> "随机切换到队列里的另一集"
+        else -> "依次播放，最后一集播完暂停"
+    }
+}
+
 /** 设置项（只保留视频播放用得上的，音频/高级项一律不做） */
 data class AppSettings(
     val darkMode: Int = 0, // 0 跟随系统 / 1 浅色 / 2 深色
@@ -27,6 +52,13 @@ data class AppSettings(
     val autoLoadSubtitle: Boolean = true,
     val hardwareDecode: Boolean = true,
     val autoPlayNext: Boolean = true,
+    /**
+     * 播放顺序：0 不连播 / 1 顺序播放 / 2 列表循环 / 3 单集循环 / 4 随机播放。
+     *
+     * 旧版本只有 autoPlayNext 一个开关，默认 true 对应「顺序播放」（最后一集停下），
+     * false 对应「不连播」，首次读取时按旧键迁移，老用户行为不变。
+     */
+    val playMode: Int = 1,
     val resumePlayback: Boolean = true,
     /** 启动时检查更新（默认开启：只在发现新版本时弹窗，平时静默） */
     val autoCheckUpdate: Boolean = true,
@@ -53,6 +85,7 @@ class SettingsRepo(private val context: Context) {
         val autoSubtitle = booleanPreferencesKey("auto_subtitle")
         val hwDecode = booleanPreferencesKey("hw_decode")
         val autoNext = booleanPreferencesKey("auto_next")
+        val playMode = intPreferencesKey("play_mode")
         val resume = booleanPreferencesKey("resume")
         val autoCheckUpdate = booleanPreferencesKey("auto_check_update")
         val lastUpdateCheck = longPreferencesKey("last_update_check")
@@ -73,6 +106,7 @@ class SettingsRepo(private val context: Context) {
             autoLoadSubtitle = prefs[Keys.autoSubtitle] ?: true,
             hardwareDecode = prefs[Keys.hwDecode] ?: true,
             autoPlayNext = prefs[Keys.autoNext] ?: true,
+            playMode = prefs[Keys.playMode] ?: if (prefs[Keys.autoNext] == false) 0 else 1,
             resumePlayback = prefs[Keys.resume] ?: true,
             autoCheckUpdate = prefs[Keys.autoCheckUpdate] ?: true,
             lastUpdateCheck = prefs[Keys.lastUpdateCheck] ?: 0L,
@@ -95,6 +129,7 @@ class SettingsRepo(private val context: Context) {
             it[Keys.autoSubtitle] = s.autoLoadSubtitle
             it[Keys.hwDecode] = s.hardwareDecode
             it[Keys.autoNext] = s.autoPlayNext
+            it[Keys.playMode] = s.playMode
             it[Keys.resume] = s.resumePlayback
             it[Keys.autoCheckUpdate] = s.autoCheckUpdate
             it[Keys.pipOnHome] = s.pipOnHome
@@ -129,6 +164,14 @@ class SettingsRepo(private val context: Context) {
 
     suspend fun setAutoPlayNext(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.autoNext] = value }
+    }
+
+    suspend fun setPlayMode(value: Int) {
+        context.settingsDataStore.edit {
+            it[Keys.playMode] = value
+            // 旧键同步维护：备份/还原与第三方读取仍按「是否连播」理解
+            it[Keys.autoNext] = value != 0
+        }
     }
 
     suspend fun setResumePlayback(value: Boolean) {

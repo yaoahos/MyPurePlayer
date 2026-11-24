@@ -42,6 +42,7 @@ import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -167,7 +168,8 @@ fun MoreRow(
         modifier = Modifier
             .fillMaxWidth()
             .mediaCardOutline()
-            .clickable(onClick = onClick, role = Role.Button)
+            // 与设置/关于同一套按压反馈：关掉 M3 的矩形波纹，改用同圆角的淡色片
+            .glassPressable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

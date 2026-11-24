@@ -177,7 +177,7 @@ fun LocalScreen(navController: NavHostController) {
 
     HideShellBottomBar(selection.active || currentFolderKey != null)
 
-    BackHandler(enabled = selection.active) { selection.exit() }
+    BackHandler(enabled = selection.active && !searchOpen) { selection.exit() }
     var infoFolder by remember { mutableStateOf<FolderGroup?>(null) }
     var pendingFolderDelete by remember { mutableStateOf<FolderGroup?>(null) }
     var renameItem by remember { mutableStateOf<VideoItem?>(null) }

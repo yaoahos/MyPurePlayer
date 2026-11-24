@@ -27,6 +27,14 @@ object SmbErrors {
     private const val NETWORK_NAME_DELETED = 0xC00000C9L
     private const val NOT_SUPPORTED = 0xC00000BBL
     private const val NETWORK_ACCESS_DENIED = 0xC00000CAL
+    private const val INVALID_PARAMETER = 0xC000000DL
+
+    /**
+     * 是不是「服务器不接受这个 READ 长度」。只有这种情况才该把块长从 1MB 降到 512KB；
+     * 网络断连、权限错误等也降级只会多一次注定失败的往返，并永久损失一半吞吐。
+     */
+    fun isInvalidParameter(t: Throwable): Boolean =
+        flatten(t).filterIsInstance<SMBApiException>().any { it.statusCode == INVALID_PARAMETER }
 
     /** 返回一句「原因 + 该怎么办」，用于提示条与错误页。 */
     fun describe(t: Throwable): String {

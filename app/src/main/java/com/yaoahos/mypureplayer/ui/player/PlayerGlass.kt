@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
@@ -35,9 +36,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.ripple.RippleAlpha
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -61,6 +65,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import com.yaoahos.mypureplayer.ui.components.glassPressLevel
+import com.yaoahos.mypureplayer.ui.components.GlassIconButton
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import androidx.compose.ui.unit.dp
 import com.yaoahos.mypureplayer.ui.components.accentColor
 import com.yaoahos.mypureplayer.ui.components.glassTint
@@ -194,6 +201,36 @@ fun rememberPlayerGlassColors(): PlayerGlassColors {
 @Composable
 fun playerGlass(): PlayerGlassColors = LocalPlayerGlass.current ?: rememberPlayerGlassColors()
 
+/** 播放页浮层里所有「按下去」的颜色：白 12%，与 [PlayerGlassPress] 的波纹同值 */
+val PlayerPressFill: Color = Color.White.copy(alpha = 0.12f)
+
+/**
+ * 播放页浮层的波纹配色。
+ *
+ * 播放页的浮层永远是深色玻璃，不跟应用的明暗模式走；而全站波纹在浅色主题下是
+ * 「主题色 20%」—— 压在深色面板上会变成一块发灰的蓝，既不像"按下去"，
+ * 也和同一块面板里的 [GlassRow] 按压淡片（白 12%）对不上。
+ *
+ * 所以播放页整块换成 白 12%：与 [GlassRow] 同值，图标按钮、文字按钮、选择行
+ * 按下去的亮度一致。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PlayerGlassPress(content: @Composable () -> Unit) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides RippleConfiguration(
+            color = Color.White,
+            rippleAlpha = RippleAlpha(
+                pressedAlpha = 0.12f,
+                focusedAlpha = 0.12f,
+                draggedAlpha = 0.12f,
+                hoveredAlpha = 0.06f,
+            ),
+        ),
+        content = content,
+    )
+}
+
 /**
  * 播放页右侧滑入面板：播放列表、字幕音轨、视频信息、投屏、字幕目录共用。
  *
@@ -266,7 +303,10 @@ fun PlayerSidePanel(
                     ),
             ) {
                 CompositionLocalProvider(LocalPlayerGlass provides glass) {
-                    Column(Modifier.fillMaxSize()) { content() }
+                    // 面板内所有图标按钮 / 文字按钮 / 选择行共用播放页那一套按压色
+                    PlayerGlassPress {
+                        Column(Modifier.fillMaxSize()) { content() }
+                    }
                 }
             }
         }
@@ -332,14 +372,16 @@ fun PlayerPopupCard(
                     ),
             ) {
                 CompositionLocalProvider(LocalPlayerGlass provides glass) {
-                    Column(
-                        Modifier
-                            .fillMaxSize()
-                            .statusBarsPadding()
-                            .navigationBarsPadding()
-                            .padding(vertical = 10.dp),
-                    ) {
-                        content()
+                    PlayerGlassPress {
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                                .navigationBarsPadding()
+                                .padding(vertical = 10.dp),
+                        ) {
+                            content()
+                        }
                     }
                 }
             }
@@ -359,23 +401,42 @@ fun GlassRow(
     selected: Boolean,
     onClick: () -> Unit,
     icon: ImageVector? = null,
+    /**
+     * 说明文字：与标题同处一行结构，行距固定 2dp。
+     *
+     * 早先「播放顺序」把说明单独画在行下方，行与说明之间要跨过行自身的内边距，
+     * 视觉上是一段空档；选中时标题变强调色、说明却还是灰的，读起来像两个不相干的东西。
+     * 收进行内之后，两者同属一块玻璃，选中态一起变色，行距也不再受行内边距影响。
+     */
+    subtitle: String? = null,
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val glass = rememberPlayerGlassColors()
     val contentColor = if (selected) glass.accent else glass.onGlass
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectPressedWithTap()
+    // 与全站同一个节奏（60ms 亮起 / 200ms 淡出）：白 7% 是即时切换的，
+    // 手指抬起来是一下子消失，读起来像"闪了一下故障"而不是"按了一下"。
+    val pressLevel = glassPressLevel(pressed)
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(
-                if (selected) glass.selectedFill else Color.Transparent,
+                when {
+                    selected -> glass.selectedFill
+                    // 按压反馈自己画：默认 ripple 会在圆角行上铺一块直角矩形
+                    else -> PlayerPressFill.copy(alpha = PlayerPressFill.alpha * pressLevel)
+                },
                 RoundedCornerShape(14.dp),
             )
             .clickable(
+                interactionSource = interactionSource,
+                indication = null,
                 role = Role.Button,
                 onClickLabel = if (selected) "取消选择" else "选择",
             ) { onClick() }
-            .padding(horizontal = 12.dp, vertical = 13.dp),
+            .padding(horizontal = 12.dp, vertical = if (subtitle == null) 13.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
@@ -387,14 +448,27 @@ fun GlassRow(
             )
             Spacer(Modifier.size(10.dp))
         }
-        Text(
-            title,
-            style = MaterialTheme.typography.bodyMedium,
-            color = contentColor,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = contentColor,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subtitle != null) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    // 选中时说明一起转强调色（略降透明度保持层次），
+                    // 不再出现「标题蓝、说明灰」的割裂感
+                    color = if (selected) glass.accent.copy(alpha = 0.78f) else glass.onGlassSecondary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         if (trailing != null) {
             trailing()
         } else if (selected) {
@@ -444,7 +518,7 @@ fun GlassPanelHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (onBack != null) {
-                IconButton(onClick = onBack) {
+                GlassIconButton(onClick = onBack, fillOverride = PlayerPressFill) {
                     Icon(
                         Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = "返回上一层",
@@ -473,7 +547,7 @@ fun GlassPanelHeader(
             }
             actions()
             if (onClose != null) {
-                IconButton(onClick = onClose) {
+                GlassIconButton(onClick = onClose, fillOverride = PlayerPressFill) {
                     Icon(
                         Icons.Rounded.Close,
                         contentDescription = "关闭",
@@ -538,11 +612,14 @@ fun PickerBreadcrumb(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
                     .then(
                         if (crumb.clickable && !last) {
-                            Modifier.clickable(role = Role.Button) { onNavigate(crumb.path) }
-                        } else Modifier,
+                            Modifier.glassPressable(
+                                radius = 6.dp,
+                                role = Role.Button,
+                                fillOverride = PlayerPressFill,
+                            ) { onNavigate(crumb.path) }
+                        } else Modifier.clip(RoundedCornerShape(6.dp)),
                     )
                     .padding(horizontal = 4.dp, vertical = 2.dp),
             )
@@ -614,6 +691,7 @@ fun PlayerPickerPanel(
                     ),
             ) {
                 CompositionLocalProvider(LocalPlayerGlass provides glass) {
+                  PlayerGlassPress {
                     // 目录选择器与其余浮层共用同一个标题栏：返回箭头、标题、副标题、
                     // 右侧操作、分隔线全部对齐，翻目录时不会突然换一套标题样式
                     Column(
@@ -641,6 +719,7 @@ fun PlayerPickerPanel(
                         }
                     }
                     Column(Modifier.fillMaxSize()) { content() }
+                  }
                 }
             }
         }

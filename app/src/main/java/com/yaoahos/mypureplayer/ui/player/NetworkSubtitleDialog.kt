@@ -48,6 +48,7 @@ import com.yaoahos.mypureplayer.data.SmbErrors
 import com.yaoahos.mypureplayer.data.SmbServer
 import com.yaoahos.mypureplayer.playback.Playback
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 
 /**
  * 「从网络目录选择字幕」。
@@ -203,8 +204,11 @@ fun NetworkSubtitlePickerDialog(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(role = Role.Button) {
+                                .glassPressable(
+                                    radius = 12.dp,
+                                    role = Role.Button,
+                                    fillOverride = PlayerPressFill,
+                                ) {
                                     if (entry.isDirectory) {
                                         path = entry.url
                                     } else {

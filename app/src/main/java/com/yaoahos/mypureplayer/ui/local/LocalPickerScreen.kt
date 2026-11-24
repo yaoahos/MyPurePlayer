@@ -1,5 +1,7 @@
 package com.yaoahos.mypureplayer.ui.local
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -156,13 +158,21 @@ fun LocalPickerScreen(navController: NavHostController, folderKey: String, targe
         ) {
             items(videos, key = { it.id }) { item ->
                 val checked = item.id in selected
+                val interaction = remember { MutableInteractionSource() }
+                val pressed by interaction.collectPressedWithTap()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        // 与其它列表页同一套行卡：玻璃底 + 20dp 圆角 + 104×60 缩略图
-                        .mediaCardOutline(pressed = checked)
-                        // 整行 toggleable：TalkBack 能读出选中状态，触屏点哪都生效
+                        // 与其它列表页同一套行卡：玻璃底 + 20dp 圆角 + 104×60 缩略图。
+                        // 勾选态走 selected（左侧竖条 + 薄纱），不再借用 pressed 冒充选中 ——
+                        // 那样一进页面就有一半卡片是"按下"色，真正的按下反而看不出变化。
+                        .mediaCardOutline(pressed = pressed, selected = checked)
+                        // 整行 toggleable：TalkBack 能读出选中状态，触屏点哪都生效。
+                        // indication = null：按压反馈已由 mediaCardOutline 统一绘制，
+                        // 默认波纹会在这张圆角卡上铺一块直角矩形。
                         .toggleable(
+                            interactionSource = interaction,
+                            indication = null,
                             value = checked,
                             role = Role.Checkbox,
                             onValueChange = { next ->

@@ -3,8 +3,10 @@ package com.yaoahos.mypureplayer.ui.more
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -17,21 +19,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -62,6 +61,10 @@ import com.yaoahos.mypureplayer.data.UpdateChecker
 import com.yaoahos.mypureplayer.data.UpdateLog
 import com.yaoahos.mypureplayer.data.UpdateResult
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
+import com.yaoahos.mypureplayer.ui.components.glassPressable
+import com.yaoahos.mypureplayer.ui.components.glassToggleable
+import com.yaoahos.mypureplayer.ui.components.GlassButton
+import com.yaoahos.mypureplayer.ui.components.GlassPanelDialog
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.SectionLabel
@@ -121,13 +124,18 @@ fun AboutScreen(navController: NavHostController) {
             Spacer(Modifier.height(24.dp))
             // 图标 / 标题整块可点，直接跳项目主页
             Column(
+                // 整块铺满宽度：原来宽度跟着文字走，按下去只有文字那一小条亮起来，
+                // 和设置页「整行都能按」的手感不是一回事。现在是一整条横贯屏幕的淡片。
                 Modifier
-                    .clip(RoundedCornerShape(PageMetrics.PanelRadius))
-                    .clickable(role = Role.Button) {
-                        runCatching { uriHandler.openUri(projectUrl) }
-                            .onFailure { Notice.error("这台设备上没有可打开网页的应用") }
-                    }
-                    .padding(horizontal = 18.dp, vertical = 4.dp),
+                    .fillMaxWidth()
+                    .glassPressable(
+                        onClick = {
+                            runCatching { uriHandler.openUri(projectUrl) }
+                                .onFailure { Notice.error("这台设备上没有可打开网页的应用") }
+                        },
+                        radius = PageMetrics.CardRadius,
+                    )
+                    .padding(horizontal = 18.dp, vertical = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 AppIconBadge(size = 78.dp)
@@ -247,61 +255,76 @@ fun AboutScreen(navController: NavHostController) {
     }
 
     if (showLog) {
-        AlertDialog(
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
-            tonalElevation = 0.dp,
-            onDismissRequest = { showLog = false },
-            title = { Text("更新日志", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    if (releaseNotes.isEmpty()) {
+        // 用全站统一的玻璃弹窗外壳，不再用 M3 AlertDialog：
+        // AlertDialog 自带「标题—正文—按钮」三段各 24dp 的留白，按钮本身还有 48dp
+        // 最小触控高度，叠起来就是关闭键上下两大块空白。这里内边距由弹窗外壳统一给
+        // （左右 22dp / 上下 20dp），底部按钮只隔 16dp，按钮换成与「测试 / 保存」
+        // 同一种玻璃按钮。
+        GlassPanelDialog(title = "更新日志", onDismiss = { showLog = false }) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                if (releaseNotes.isEmpty()) {
+                    Text(
+                        "暂无更新日志。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                releaseNotes.forEachIndexed { index, note ->
+                    if (index > 0) {
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(vertical = 12.dp),
+                        )
+                    }
+                    Text(
+                        buildString {
+                            append(note.date)
+                            if (note.version.isNotBlank()) append("    v${note.version}")
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                    note.notes.forEach { line ->
                         Text(
-                            "暂无更新日志。",
+                            "· $line",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 18.sp,
+                            modifier = Modifier.padding(top = 3.dp),
                         )
-                    }
-                    releaseNotes.forEachIndexed { index, note ->
-                        if (index > 0) {
-                            HorizontalDivider(
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                                modifier = Modifier.padding(vertical = 12.dp),
-                            )
-                        }
-                        Text(
-                            buildString {
-                                append(note.date)
-                                if (note.version.isNotBlank()) append("    v${note.version}")
-                            },
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(bottom = 6.dp),
-                        )
-                        note.notes.forEach { line ->
-                            Text(
-                                "· $line",
-                                style = MaterialTheme.typography.bodySmall,
-                                lineHeight = 18.sp,
-                                modifier = Modifier.padding(top = 3.dp),
-                            )
-                        }
-                    }
-                    if (releaseNotes.isNotEmpty()) {
-                        TextButton(onClick = {
-                            runCatching { uriHandler.openUri("$projectUrl/releases") }
-                                .onFailure { Notice.error("这台设备上没有可打开网页的应用") }
-                        }) { Text("查看更早的版本") }
                     }
                 }
-            },
-            confirmButton = { TextButton(onClick = { showLog = false }) { Text("关闭") } },
-        )
+                // 「查看更早的版本」属于**内容**，跟在最后一条日志后面，随日志一起滚动。
+                // 固定在底部按钮栏时，它和「关闭」并排、和正文脱节，读起来像第二个关闭键；
+                // 而它要跳转的是"这份日志之外的更早版本"，语义上就该在正文末尾。
+                if (releaseNotes.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "查看更早的版本",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = appGlass().accent,
+                        modifier = Modifier
+                            .glassPressable(
+                                radius = 10.dp,
+                                onClick = {
+                                    runCatching { uriHandler.openUri("$projectUrl/releases") }
+                                        .onFailure { Notice.error("这台设备上没有可打开网页的应用") }
+                                },
+                            )
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                GlassButton(text = "关闭", onClick = { showLog = false })
+            }
+        }
     }
 
     // 下载完成后优先弹「立即安装」，不再叠加「发现新版本」——与全局 UpdatePromptHost
@@ -340,7 +363,7 @@ fun AboutScreen(navController: NavHostController) {
     }
 }
 
-/** 「更新」区块：与上方各区块同版式，行内只放一行标题 + 右侧状态/开关 + 箭头 */
+/** 「更新」区块：标题加粗在上、状态小字在下，右侧只保留必要开关，不再塞说明文字 */
 @Composable
 private fun UpdateSection(
     autoCheck: Boolean,
@@ -350,61 +373,78 @@ private fun UpdateSection(
     hasLog: Boolean,
     onOpenLog: () -> Unit,
 ) {
-    SectionFrame("更新") {
+    // 内边距交给每一行自己给（contentPadding = Zero）：行才能贴到卡片左右边界，
+    // 与设置页的开关行按下时是同一个范围。
+    SectionFrame("更新", contentPadding = PaddingValues(vertical = 0.dp)) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 7.dp),
+                // 整行可切换：与设置页开关行保持同一套交互，玻璃条任意位置都能开关；
+                // Switch 只作视觉指示，onCheckedChange 置空，避免子控件与整行各切换一次。
+                //
+                // 用 glassToggleable 而不是原生 toggleable：后者的按压波纹是一块**直角**
+                // 矩形，压在圆角玻璃条里就是用户反复提到的「白色细框 / 矩形阴影」。
+                // 这里关掉波纹，改成同圆角的主题色淡片，按压反馈仍保留。
+                Modifier
+                    .fillMaxWidth()
+                    .glassToggleable(value = autoCheck, onValueChange = onAutoCheck)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("启动时检查更新", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "启动时检查更新",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
                 Spacer(Modifier.weight(1f))
-                Switch(checked = autoCheck, onCheckedChange = onAutoCheck)
+                Switch(checked = autoCheck, onCheckedChange = null)
             }
             UpdateActionRow(
                 title = "检查更新",
-                value = if (checking) "正在检查…" else "当前 ${BuildConfig.VERSION_NAME}",
+                // 下方只留版本号：原来那句「点击检查是否有新版本」既是废话，
+                // 也把一行状态文字挤成两行，反而不像"状态"了
+                value = if (checking) "正在检查…" else "当前版本 ${BuildConfig.VERSION_NAME}",
                 onClick = onCheck,
             )
             UpdateActionRow(
                 title = "更新日志",
-                value = if (hasLog) "查看各版本内容" else "暂无",
+                value = if (hasLog) "查看各版本更新内容" else "暂无更新日志",
                 onClick = if (hasLog) onOpenLog else null,
             )
         }
     }
 }
 
-/** 单行操作：左侧标题，右侧浅色状态文字 + 箭头；不可点时只显示状态 */
+/** 整行可点：粗体标题在上，小字状态在下；没有右侧文字和箭头 */
 @Composable
 private fun UpdateActionRow(
     title: String,
     value: String,
     onClick: (() -> Unit)?,
 ) {
-    Row(
+    Column(
         Modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick, role = Role.Button) else Modifier)
-            .padding(vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .then(
+                if (onClick != null) {
+                    // 与开关行同一套：关掉矩形波纹，改成同圆角的按压淡片
+                    Modifier.glassPressable(onClick = onClick)
+                } else Modifier,
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.weight(1f))
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(2.dp))
         Text(
             value,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
-        if (onClick != null) {
-            Icon(
-                imageVector = Icons.Rounded.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                modifier = Modifier.padding(start = 4.dp).size(16.dp),
-            )
-        }
     }
 }
 
@@ -510,7 +550,18 @@ private fun Section(title: String, body: String) {
 
 /** 关于页所有区块的统一外壳：小标题 + 22dp 圆角卡，标题与卡片的间距只在这里定义 */
 @Composable
-private fun SectionFrame(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun SectionFrame(
+    title: String,
+    /**
+     * 卡片内容的内边距。
+     *
+     * 纯文字区块需要左右 16dp；而「更新」区是整行可点的（与设置页同构），
+     * 行必须能贴到卡片边界，否则按下去只有中间一段亮 —— 就是"关于的点击反馈
+     * 比设置小一圈"的来源。这类区块传 [PaddingValues.Zero]，内边距由行自己给。
+     */
+    contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+    content: @Composable ColumnScope.() -> Unit,
+) {
     Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
         // 分区标题与设置页、本地页共用 SectionLabel：蓝竖条 + titleSmall
         SectionLabel(title)
@@ -519,7 +570,7 @@ private fun SectionFrame(title: String, content: @Composable ColumnScope.() -> U
             Modifier
                 .fillMaxWidth()
                 .appGlassSurface(RoundedCornerShape(PageMetrics.CardRadius))
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(contentPadding),
             content = content,
         )
     }

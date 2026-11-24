@@ -42,6 +42,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.semantics.Role
 import com.yaoahos.mypureplayer.core.Formats
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -195,8 +196,11 @@ fun LocalSubtitlePickerDialog(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(role = Role.Button) { refresh(dir) }
+                                .glassPressable(
+                                    radius = 12.dp,
+                                    role = Role.Button,
+                                    fillOverride = PlayerPressFill,
+                                ) { refresh(dir) }
                                 .padding(horizontal = 10.dp, vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -225,8 +229,11 @@ fun LocalSubtitlePickerDialog(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(role = Role.Button) { onPick(file) }
+                                .glassPressable(
+                                    radius = 12.dp,
+                                    role = Role.Button,
+                                    fillOverride = PlayerPressFill,
+                                ) { onPick(file) }
                                 .padding(horizontal = 10.dp, vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {

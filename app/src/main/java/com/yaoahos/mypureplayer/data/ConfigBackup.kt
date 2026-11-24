@@ -35,7 +35,10 @@ object ConfigBackup {
 
     const val SCHEMA = 2
 
-    /** WebDAV 上固定用这个文件名：恢复时不必让用户回忆/挑选，上传即覆盖上一次 */
+    /**
+     * 1.0.0 时代云端只有这一个固定文件（上传即覆盖）。1.0.1 起改为「一设备一份」，
+     * 这个常量只用于两件事：识别旧备份以便迁移恢复、目录地址拼装时的兜底。
+     */
     const val REMOTE_FILE = "MyPurePlayer-config.mpp"
 
     /**
@@ -70,6 +73,7 @@ object ConfigBackup {
         val autoLoadSubtitle: Boolean = true,
         val hardwareDecode: Boolean = true,
         val autoPlayNext: Boolean = true,
+        val playMode: Int = 1,
         val resumePlayback: Boolean = true,
         val autoCheckUpdate: Boolean = true,
         val pipOnHome: Boolean = true,
@@ -104,8 +108,9 @@ object ConfigBackup {
         prettyPrint = true
     }
 
+    /** 本机备份文件名：精确到秒，避免同一分钟连备两次撞名。 */
     fun suggestedFileName(): String =
-        "MyPurePlayer-config-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date()) + EXTENSION
+        "MyPurePlayer-config-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date()) + EXTENSION
 
     /** 协议默认端口。WebDAV 没有专属端口，走的就是 HTTP/HTTPS 的 80/443。 */
     fun defaultPort(scheme: String): Int = if (scheme.equals("http", ignoreCase = true)) 80 else 443
@@ -137,13 +142,22 @@ object ConfigBackup {
      * 基地址 + 目录 → 远端文件地址。目录可多级，逐段做百分号编码：
      * 中文目录名直接塞进 URL 会抛异常，这是最容易在真机上出错的一处。
      */
-    fun remoteUrl(baseUrl: String, folder: String): String {
+    /**
+     * 基地址 + 目录 → 远端目录地址。目录可多级，逐段做百分号编码：
+     * 中文目录名直接塞进 URL 会抛异常，这是最容易在真机上出错的一处。
+     * 列目录时用这个地址（末尾不带文件名）。
+     */
+    fun remoteDir(baseUrl: String, folder: String): String {
         val base = baseUrl.trim().trimEnd('/')
         val segments = folder.trim().trim('/').split('/')
             .filter { it.isNotBlank() }
             .map { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
-        return (listOf(base) + segments).joinToString("/") + "/" + REMOTE_FILE
+        return (listOf(base) + segments).joinToString("/")
     }
+
+    /** 基地址 + 目录 + 文件名 → 远端文件地址。默认是旧版单文件名，按设备备份时传入设备文件名。 */
+    fun remoteUrl(baseUrl: String, folder: String, fileName: String = REMOTE_FILE): String =
+        remoteDir(baseUrl, folder) + "/" + fileName
 
     suspend fun export(): String {
         // 仓库可能还没被页面打开过（用户从设置页直接备份），先载入再取快照。
@@ -164,6 +178,7 @@ object ConfigBackup {
                 autoLoadSubtitle = s.autoLoadSubtitle,
                 hardwareDecode = s.hardwareDecode,
                 autoPlayNext = s.autoPlayNext,
+                playMode = s.playMode,
                 resumePlayback = s.resumePlayback,
                 autoCheckUpdate = s.autoCheckUpdate,
                 pipOnHome = s.pipOnHome,

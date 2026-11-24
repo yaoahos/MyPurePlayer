@@ -32,6 +32,7 @@ import com.yaoahos.mypureplayer.data.QueueRepo
 import com.yaoahos.mypureplayer.data.ServerRepo
 import com.yaoahos.mypureplayer.data.SettingsRepo
 import com.yaoahos.mypureplayer.data.SmbClient
+import com.yaoahos.mypureplayer.data.SmbErrors
 import com.yaoahos.mypureplayer.data.SmbServer
 import com.yaoahos.mypureplayer.data.SubtitleFile
 import com.yaoahos.mypureplayer.data.SubtitleTrack
@@ -54,6 +55,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 
 /**
@@ -111,7 +115,6 @@ object Playback {
     private var audioCapabilities: androidx.media3.exoplayer.audio.AudioCapabilities? = null
 
     private var lastHistoryTick = 0L
-    private var retriedLocal = false
     private var retriedNetwork = false
     private var localStrategy = 0
 
@@ -189,6 +192,22 @@ object Playback {
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
     /**
+     * 播放页里临时改的播放顺序，只服务当前这个队列。
+     * 设置页改的是全局默认值（[AppSettings.playMode]），换一批视频重新 setQueue 时这里自动清空，
+     * 不会把「这次想单集循环」带到下一个文件夹。
+     */
+    private var sessionPlayMode: Int? = null
+
+    private fun effectivePlayMode(): Int = sessionPlayMode ?: settings.playMode
+
+    /** 播放页 / 播放列表面板里的「仅当前列表」播放顺序。 */
+    fun setSessionPlayMode(mode: Int) {
+        sessionPlayMode = mode
+        _state.update { it.copy(playMode = mode) }
+        Notice.success("已设为${com.yaoahos.mypureplayer.data.PlayModes.label(mode)}（仅当前列表）")
+    }
+
+    /**
      * 播放进度独立成流：Media3 的 position 每 200ms 刷新一次，若和 _state 放一起会让
      * 整个播放页（标题、按钮、字幕列表……）每秒重组 3~4 次。现在只有进度条与
      * 时间文本订阅这个流，其余 UI 只在真正状态变化时重组。
@@ -249,7 +268,10 @@ object Playback {
         // 前台服务既无必要，也会让「还没播放就出现媒体通知」。
 
         scope.launch {
-            settingsRepo.settings.collect { settings = it }
+            settingsRepo.settings.collect {
+                settings = it
+                if (sessionPlayMode == null) _state.update { s -> s.copy(playMode = it.playMode) }
+            }
         }
         scope.launch {
             val restored = queueStore.load()
@@ -497,6 +519,8 @@ object Playback {
 
     /** 读取观看历史里的续播点；看到结尾（剩不到 5 秒）就当已看完，下次从头播。 */
     private fun resumePositionOf(item: VideoItem): Long {
+        // 设置里关掉「记忆播放进度」时，历史照记（历史页要显示看过），但下次必须从头播
+        if (!settings.resumePlayback) return 0L
         // 保险箱里的视频有自己的进度表：历史记录里根本没有它，去那边查必然是 0
         if (item.id.startsWith(PlaybackProgressRepo.VAULT_PREFIX)) {
             val repo = progressRepo ?: return 0L
@@ -514,6 +538,9 @@ object Playback {
     }
 
     fun setQueue(items: List<VideoItem>) {
+        // 换新列表（例如从另一个文件夹打开视频）时，播放页里临时选的顺序不再适用
+        sessionPlayMode = null
+        _state.update { it.copy(playMode = effectivePlayMode()) }
         _queue.value = items
         persistQueue()
     }
@@ -550,7 +577,8 @@ object Playback {
     fun clearQueue() {
         stopInternal()
         _queue.value = emptyList()
-        _state.value = PlayerUiState()
+        sessionPlayMode = null
+        _state.value = PlayerUiState(playMode = effectivePlayMode())
         persistQueue()
     }
 
@@ -672,6 +700,9 @@ object Playback {
         if (index !in items.indices) return
         val target = items[index]
         if (_state.value.item?.id != target.id) {
+            // 投屏时电视还在播上一集；换片若不先断开，就会「电视播旧的、手机播新的」。
+            // 这里先退回本机播放，新的一集要再投需要用户主动选设备。
+            if (activeDlnaDevice != null) stopCasting()
             forcedSubtitle = null
             forcedSubtitleName = null
             _subtitleFiles.value = emptyList()
@@ -687,6 +718,8 @@ object Playback {
         startMs: Long = 0L,
         keepSubtitle: Boolean = false,
         soft: Boolean = false,
+        /** 失败重试时传 false：否则这里一清计数，onPlayerError 的「只重试一次」永远生效不了 */
+        resetRetry: Boolean = true,
     ) {
         val items = _queue.value
         if (index !in items.indices) return
@@ -722,6 +755,7 @@ object Playback {
             item = item,
             queueIndex = index,
             queueSize = items.size,
+            playMode = effectivePlayMode(),
             durationMs = prev.durationMs.takeIf { soft && sameItem } ?: seededDuration(item),
             buffering = !soft,
             // 起播准备中：覆盖「置起状态 → setMediaItem 的 IDLE 空档 → prepare → 首帧」整个等待期，
@@ -748,9 +782,10 @@ object Playback {
             lastAudioTracks = emptyList()
         }
 
-        retriedLocal = false
-        retriedNetwork = false
-        localStrategy = 0
+        if (resetRetry) {
+            retriedNetwork = false
+            localStrategy = 0
+        }
         thumbCaptured = false
         pendingSeekMs = startMs
         // 新一轮起播：首帧尚未渲染，递增代号让上一集的迟到回调失效
@@ -789,7 +824,11 @@ object Playback {
                     // 直连：smb:// 交给 SmbRoutingDataSource，复用 SMB 句柄、seek 不重新握手。
                     // 不再绕 http://127.0.0.1 中转 —— 那里每层 Range 都新建 SMB 会话，
                     // 正是「打开慢、快进卡、偶发卡住」的根因。
-                    val url = SmbClient.playableUrl(srv, item)
+                    val fullUrl = SmbClient.playableUrl(srv, item)
+                    // MediaItem / MediaSession / 错误日志里都不该出现明文口令；
+                    // 凭据留在进程内的注册表，DataSource 按无凭据 URL 取回即可。
+                    val url = SmbClient.playableUrlWithoutCredentials(fullUrl)
+                    SmbPlaybackRegistry.register(fullUrl, srv)
                     SmbPlaybackRegistry.register(url, srv)
                     contentUri = Uri.parse(url)
                     isNetwork = true
@@ -868,8 +907,51 @@ object Playback {
         return builder.build()
     }
 
+    /**
+     * 中文字幕大量是 GBK / GB18030 编码，Media3 的 SubRip / ASS 解析器默认按 UTF-8 读，
+     * 结果是整屏乱码。这里把本地字幕（含从 SMB 缓存下来的）转成 UTF-8 副本再交给播放器。
+     * UTF-8 原文件直接复用，不额外拷贝；BOM 交给解析器自己处理。
+     */
+    private fun utf8SubtitlePath(path: String): String {
+        val file = File(path)
+        if (!file.isFile) return path
+        val ext = Formats.extensionOf(file.name)
+        if (ext !in setOf("srt", "ass", "ssa", "vtt")) return path
+        val bytes = runCatching { file.readBytes() }.getOrNull() ?: return path
+        if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() &&
+            bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()
+        ) return path
+        val text = when {
+            bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte() ->
+                String(bytes.copyOfRange(2, bytes.size), Charsets.UTF_16LE)
+            bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte() ->
+                String(bytes.copyOfRange(2, bytes.size), Charsets.UTF_16BE)
+            else -> runCatching {
+                Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes)).toString()
+            }.getOrElse {
+                // 严格 UTF-8 解不开才按 GB18030 试；它覆盖 GBK / GB2312
+                runCatching { String(bytes, Charset.forName("GB18030")) }
+                    .getOrElse { return path }
+            }
+        }
+        val key = "$path|${file.lastModified()}|${file.length()}"
+        val digest = MessageDigest.getInstance("SHA-1")
+            .digest(key.toByteArray()).joinToString("") { "%02x".format(it) }
+        val cached = File(app.cacheDir, "subs/utf8_$digest.$ext")
+        if (cached.exists() && cached.length() > 0L) return cached.absolutePath
+        return runCatching {
+            cached.parentFile?.mkdirs()
+            cached.writeBytes(text.toByteArray(Charsets.UTF_8))
+            cached.absolutePath
+        }.getOrDefault(path)
+    }
+
     private fun subtitleConfiguration(path: String, name: String?, id: Int): MediaItem.SubtitleConfiguration {
-        val uri = if (path.contains("://")) Uri.parse(path) else Uri.fromFile(File(path))
+        val remote = path.contains("://")
+        val uri = if (remote) Uri.parse(path) else Uri.fromFile(File(utf8SubtitlePath(path)))
         val mime = when (Formats.extensionOf(name ?: path).lowercase()) {
             "ass" -> MimeTypes.TEXT_SSA
             "ssa" -> MimeTypes.TEXT_SSA
@@ -1108,6 +1190,8 @@ object Playback {
         }
         runCatching { castWakeLock?.takeIf { it.isHeld }?.release() }
         castWakeLock = null
+        // 投屏结束就把本地流服务收回回环：不再对局域网开放，局域网 token 也随 TTL 失效
+        runCatching { LocalStreamServer.stopLan() }
         _state.update { it.copy(rendererName = "") }
     }
 
@@ -1372,7 +1456,7 @@ object Playback {
             }
             if (settings.autoLoadSubtitle && exact != null && forcedSubtitle == null && server != null) {
                 val target = cacheRemoteSubtitle(server, exact.uri, exact.name)
-                    ?: SmbClient.playableUrl(server, exact.uri)
+                    ?: smbSubtitleUrl(server, exact.uri)
                 if (!isCurrent(item.id)) return@launch
                 restartWithSubtitle(target, exact.name, expectedItemId = item.id)
             }
@@ -1385,6 +1469,18 @@ object Playback {
         val file = remoteSubtitleFile(url, name)
         if (file.exists() && file.length() > 0L) return file.absolutePath
         return if (SmbClient.cacheSubtitle(server, url, file).isSuccess) file.absolutePath else null
+    }
+
+    /**
+     * 字幕缓存失败时的兜底直链：同样去掉 userinfo，凭据只留在进程内注册表。
+     * 之前外挂字幕 URL 带明文口令，和视频主 URL 的处理不一致。
+     */
+    private fun smbSubtitleUrl(server: SmbServer, rawUrl: String): String {
+        val full = SmbClient.playableUrl(server, rawUrl)
+        val plain = SmbClient.playableUrlWithoutCredentials(full)
+        SmbPlaybackRegistry.register(full, server)
+        SmbPlaybackRegistry.register(plain, server)
+        return plain
     }
 
     private fun remoteSubtitleFile(url: String, name: String): File {
@@ -1437,7 +1533,7 @@ object Playback {
             if (!cached.exists() || cached.length() <= 0L) {
                 withContext(Dispatchers.Main.immediate) { Notice.info("正在准备字幕…") }
             }
-            val target = cacheRemoteSubtitle(server, url, name) ?: SmbClient.playableUrl(server, url)
+            val target = cacheRemoteSubtitle(server, url, name) ?: smbSubtitleUrl(server, url)
             withContext(Dispatchers.Main.immediate) {
                 restartWithSubtitle(target, name, expectedItemId = current.id)
             }
@@ -1573,6 +1669,7 @@ object Playback {
      */
     private fun captureThumbnail(retry: Boolean = false) {
         val item = _state.value.item ?: return
+        val itemId = item.id
         if (item.source == MediaSource.LOCAL) return // 本地有系统缩略图，不需要截
         if (thumbCaptured && !retry) return
         // 画面宿主既可能是 TextureView（默认，转场不留残影）也可能是 SurfaceView，
@@ -1581,6 +1678,9 @@ object Playback {
         thumbCaptured = true
         // 稍等一下再截：刚上屏往往还是片头黑场/台标/字幕条
         host.postDelayed({
+            // 延迟期间用户可能已经切到下一集：Surface 上那时是新画面，
+            // 旧 item 拿着它落盘会把 A 的缩略图挂到 B 上，这里直接丢弃这一帧。
+            if (_state.value.item?.id != itemId) return@postDelayed
             runCatching {
                 val w = host.width
                 val h = host.height
@@ -1593,7 +1693,10 @@ object Playback {
                             v,
                             target,
                             { result ->
-                                if (result == PixelCopy.SUCCESS) {
+                                // PixelCopy 是异步的：回来时可能又换了一集，再核对一次
+                                if (result == PixelCopy.SUCCESS &&
+                                    _state.value.item?.id == itemId
+                                ) {
                                     onFrameCaptured(item, target, retry)
                                 } else {
                                     runCatching { target.recycle() }
@@ -1729,18 +1832,36 @@ object Playback {
             // 本地文件：换下一种数据源策略再试
             if (item != null && item.source == MediaSource.LOCAL && localStrategy < 2) {
                 localStrategy++
-                retriedLocal = true
-                startAt(_state.value.queueIndex, positionMs.value, keepSubtitle = true)
+                startAt(
+                    _state.value.queueIndex,
+                    positionMs.value,
+                    keepSubtitle = true,
+                    resetRetry = false,
+                )
                 return
             }
-            // 网络视频（SMB）：重建媒体并回到原位置再试一次
-            if (item != null && item.source == MediaSource.SMB && !retriedNetwork) {
+            // 网络视频（SMB / http 串流）：重建媒体并回到原位置再试一次。
+            // HTTP 短链跳转、Wi-Fi 瞬断经常只失败一次；直接弹错误页会让人以为链接失效。
+            if (item != null &&
+                (item.source == MediaSource.SMB || item.source == MediaSource.STREAM) &&
+                !retriedNetwork
+            ) {
                 retriedNetwork = true
-                startAt(_state.value.queueIndex, positionMs.value, keepSubtitle = true)
+                startAt(
+                    _state.value.queueIndex,
+                    positionMs.value,
+                    keepSubtitle = true,
+                    resetRetry = false,
+                )
                 return
+            }
+            val message = if (item?.source == MediaSource.SMB) {
+                SmbErrors.describe(error.cause ?: error)
+            } else {
+                playbackErrorMessage(error)
             }
             _state.update {
-                it.copy(playing = false, buffering = false, preparing = false, error = playbackErrorMessage(error))
+                it.copy(playing = false, buffering = false, preparing = false, error = message)
             }
         }
 
@@ -1782,15 +1903,31 @@ object Playback {
     private fun onPlaybackEnded() {
         recordHistory(force = true)
         val index = _state.value.queueIndex
-        val hasNext = index >= 0 && index < _queue.value.lastIndex
-        if (settings.autoPlayNext && hasNext) {
-            requestStart(index + 1)
-        } else {
-            // 停掉 playWhenReady：通知栏/媒体键的「播放」才会走 onPlayWhenReadyChanged
-            // 那条重启路径，而不是把已经结束的时间线再试一次。
-            runCatching { player?.playWhenReady = false }
-            _state.update { it.copy(playing = false, ended = true, buffering = false, preparing = false) }
+        val size = _queue.value.size
+        val hasNext = index >= 0 && index < size - 1
+        // 播放顺序：0 不连播 / 1 顺序 / 2 列表循环 / 3 单集循环 / 4 随机。
+        // 旧版本只有「自动播放下一个」开关，已在 Prefs 里迁移到 0/1，老用户行为不变。
+        when (effectivePlayMode()) {
+            3 -> requestStart(index, 0L) // 单集循环：从头重播当前这一集
+            2 -> if (size > 0) requestStart(if (hasNext) index + 1 else 0) else finishQueue()
+            4 -> {
+                if (size <= 1) {
+                    requestStart(index, 0L)
+                } else {
+                    // 随机不连着抽到同一集；队列较短时排除当前项即可
+                    val candidates = _queue.value.indices.filter { it != index }
+                    requestStart(candidates[kotlin.random.Random.nextInt(candidates.size)], 0L)
+                }
+            }
+            1 -> if (hasNext) requestStart(index + 1) else finishQueue()
+            else -> finishQueue()
         }
+    }
+
+    /** 播完停在结尾：停掉 playWhenReady，媒体键的「播放」会走重启路径而不是重试结束的时间线。 */
+    private fun finishQueue() {
+        runCatching { player?.playWhenReady = false }
+        _state.update { it.copy(playing = false, ended = true, buffering = false, preparing = false) }
     }
 
     /** Media3 解码出真实画面尺寸后上报给界面，用于按视频比例自动决定横竖屏 */
@@ -1918,8 +2055,13 @@ object Playback {
         }
     }
 
-    fun onScreenLeave() {
+    /**
+     * @param pause 是否立刻暂停。退出播放页做淡出动画时传 false：让最后一帧继续播放，
+     *   避免"冻结画面淡出"和中央播放键突然闪现；页面真正 dispose 时再按默认值暂停。
+     */
+    fun onScreenLeave(pause: Boolean = true) {
         recordHistory(force = true)
+        if (!pause) return
         // 后台音频 / 画中画模式下离开播放页 / 退到后台都不能暂停
         if (_state.value.backgroundAudio || pictureInPicture) return
         // 不判 isPlaying：缓冲、seek 之后、刚起播这几瞬间 isPlaying 都是 false，

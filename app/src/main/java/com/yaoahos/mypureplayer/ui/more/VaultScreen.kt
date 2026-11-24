@@ -4,7 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -71,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -97,6 +99,7 @@ import com.yaoahos.mypureplayer.ui.components.MediaSortDraft
 import com.yaoahos.mypureplayer.ui.components.Notice
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
+import com.yaoahos.mypureplayer.ui.components.PasswordEye
 import com.yaoahos.mypureplayer.ui.components.SearchField
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
@@ -164,11 +167,13 @@ fun VaultScreen(navController: NavHostController) {
     // 关闭保险箱 = 清掉门禁 + 把内容全部解密搬回原目录，属于不可逆操作。
     // 必须先在同一个对话框里验明身份（密码或指纹），不能只点一下「关闭」就执行。
     var disablePin by remember { mutableStateOf("") }
+    var showDisablePin by remember { mutableStateOf(false) }
     var disableError by remember { mutableStateOf<String?>(null) }
     var disableBusy by remember { mutableStateOf(false) }
     // 修改密码前校验旧密码
     var oldPinCheck by remember { mutableStateOf(false) }
     var oldPinText by remember { mutableStateOf("") }
+    var showOldPin by remember { mutableStateOf(false) }
     var oldPinError by remember { mutableStateOf<String?>(null) }
     var oldPinBusy by remember { mutableStateOf(false) }
     // 「修改密码」刚验证过的原密码：改密码时要靠它解出原数据密钥再重包，
@@ -238,6 +243,13 @@ fun VaultScreen(navController: NavHostController) {
         } else {
             currentFolder = currentFolder?.let { parentFolderKey(it, folders) }
         }
+    }
+
+    // 搜索框打开时返回键先收搜索框，再谈退文件夹/退出页面。
+    // 写在上面那条之后，保证同时启用时它先拿到事件。
+    BackHandler(enabled = searchOpen) {
+        searchOpen = false
+        query = ""
     }
 
     fun play(entry: VaultEntry) {
@@ -563,7 +575,7 @@ fun VaultScreen(navController: NavHostController) {
                                     subtitle = "${folder.entries.size} 个视频",
                                     onClick = {
                                         if (selection.active) selection.toggle(folderKey)
-                                        else currentFolder = folder.key
+                                        else flashClick { currentFolder = folder.key }
                                     },
                                     onLongClick = {
                                         // 长按只进入选择态，不弹更多面板
@@ -582,7 +594,7 @@ fun VaultScreen(navController: NavHostController) {
                                     entry = entry,
                                     onClick = {
                                         if (selection.active) selection.toggle(videoKey)
-                                        else play(entry)
+                                        else flashClick { play(entry) }
                                     },
                                     onLongClick = {
                                         // 长按只进入选择态，不弹更多面板
@@ -616,7 +628,7 @@ fun VaultScreen(navController: NavHostController) {
                                     subtitle = "${folder.entries.size} 个视频",
                                     onClick = {
                                         if (selection.active) selection.toggle(folderKey)
-                                        else currentFolder = folder.key
+                                        else flashClick { currentFolder = folder.key }
                                     },
                                     onLongClick = {
                                         // 长按只进入选择态，不弹更多面板
@@ -635,7 +647,7 @@ fun VaultScreen(navController: NavHostController) {
                                     entry = entry,
                                     onClick = {
                                         if (selection.active) selection.toggle(videoKey)
-                                        else play(entry)
+                                        else flashClick { play(entry) }
                                     },
                                     onLongClick = {
                                         // 长按只进入选择态，不弹更多面板
@@ -694,7 +706,12 @@ fun VaultScreen(navController: NavHostController) {
                         label = { Text("当前密码") },
                         singleLine = true,
                         isError = oldPinError != null,
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (showOldPin) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = { PasswordEye(showOldPin) { showOldPin = !showOldPin } },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -922,7 +939,14 @@ fun VaultScreen(navController: NavHostController) {
                         label = { Text("密码") },
                         singleLine = true,
                         isError = disableError != null,
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (showDisablePin) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            PasswordEye(showDisablePin) { showDisablePin = !showDisablePin }
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -1097,7 +1121,7 @@ private fun VaultGridCard(
     selecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compact = maxWidth < 100.dp
         Column(
@@ -1160,7 +1184,7 @@ private fun VaultListRow(
     selecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
     Row(
         modifier = Modifier
             .fillMaxWidth()

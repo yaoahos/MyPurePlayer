@@ -6,6 +6,7 @@ import android.content.Context
 import android.os.Environment
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
@@ -64,6 +66,7 @@ import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -372,10 +375,10 @@ internal fun ActionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(
-                enabled = enabled,
-                onClick = onClick,
-                role = if (enabled) Role.Button else null,
+            // 与设置页/关于页同一套按压反馈：关掉矩形波纹，用同圆角的淡片
+            .then(
+                if (enabled) Modifier.glassPressable(radius = 12.dp, onClick = onClick)
+                else Modifier,
             )
             .padding(horizontal = 24.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -442,13 +445,17 @@ fun SelectionActionBar(
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
     Box(
         modifier
+            // 平板/横屏下只把这条玻璃底限宽居中，四个按钮仍在条内均分铺开；
+            // 不再去挤按钮间距——用户要收的是玻璃条本身，不是把按钮挪近。
+            .widthIn(max = PageMetrics.DialogMaxWidth)
             .fillMaxWidth()
-            // 平板/横屏下操作栏限宽居中，四个图标不会横向摊到整屏两端。
-            .widthIn(max = PageMetrics.SheetMaxWidth)
             .appGlassSurface(shape = RoundedCornerShape(28.dp), strong = true, elevation = 4.dp)
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
             shown.forEach { action ->
                 val tint = when {
                     !action.enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
@@ -459,7 +466,9 @@ fun SelectionActionBar(
                     modifier = Modifier
                         .then(
                             if (action.enabled) {
-                                Modifier.clickable(onClick = action.onClick, role = Role.Button)
+                                // 与设置行同一套按压淡片：图标按钮也是玻璃上的一块可点区域，
+                                // 原来这里走的是 M3 波纹，方形边界在圆角卡上很明显
+                                Modifier.glassPressable(role = Role.Button, onClick = action.onClick)
                             } else Modifier,
                         )
                         .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -522,7 +531,11 @@ fun SelectionMoreSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(if (action.enabled) Modifier.clickable(onClick = action.onClick, role = Role.Button) else Modifier)
+                        .then(
+                            if (action.enabled) {
+                                Modifier.glassPressable(role = Role.Button, onClick = action.onClick)
+                            } else Modifier,
+                        )
                         .padding(vertical = 13.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -665,7 +678,7 @@ internal fun InfoRow(label: String, value: String, copyable: Boolean = false) {
                 color = if (copied) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.onSurface,
                 modifier = if (copyable && value.isNotBlank() && value != "—") {
-                    Modifier.clickable(role = Role.Button) {
+                    Modifier.glassPressable(role = Role.Button, radius = 8.dp) {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                         cm?.setPrimaryClip(ClipData.newPlainText(label, value))
                         copied = true
@@ -732,8 +745,9 @@ fun DirPickerDialog(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(role = Role.Button) { current.parentFile?.let { current = it } }
+                                .glassPressable(radius = 12.dp, role = Role.Button) {
+                                    current.parentFile?.let { current = it }
+                                }
                                 .padding(horizontal = 10.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -750,8 +764,7 @@ fun DirPickerDialog(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(role = Role.Button) { current = dir }
+                                .glassPressable(radius = 12.dp, role = Role.Button) { current = dir }
                                 .padding(horizontal = 10.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -839,6 +852,9 @@ fun PlaylistTargetSheet(
  * 玻璃选择弹窗内部的圆条选项：直接用本地文件夹卡片同款玻璃材质 [appGlassSurface]。
  * 面板已改为首页那张浅色渐变（[appDialogSurface]），选项再叠一张淡蓝玻璃卡，
  * 正是首页「淡背景 + 淡蓝玻璃卡」的层次，不会像过去"白条压灰板"那样突兀。
+ *
+ * [selected] 用于「当前生效的那一项」：底色染主题色 + 标题改强调色 + 右侧打勾，
+ * 三处同时出现，避免只换底色在深色主题下看不出选中。
  */
 @Composable
 fun GlassChoiceRow(
@@ -846,29 +862,56 @@ fun GlassChoiceRow(
     title: String,
     subtitle: String,
     enabled: Boolean = true,
+    selected: Boolean = false,
     onClick: () -> Unit,
 ) {
     val contentAlpha = if (enabled) 1f else 0.5f
+    val accent = appGlass().accent
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectPressedWithTap()
+    val shape = RoundedCornerShape(GlassPress.radius)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .then(
                 if (enabled) {
-                    Modifier.appGlassSurface(RoundedCornerShape(16.dp), elevation = 1.dp)
+                    Modifier
+                        .appGlassSurface(
+                            shape,
+                            elevation = 1.dp,
+                            tinted = selected,
+                        )
+                        // 选项条原先**没有任何按压反馈**：只有选中态变色。
+                        // 点一下没反应会让人以为没点上，于是连点两下（第二下才看到选中）。
+                        .glassPressOverlay(pressed, shape)
                 } else {
                     Modifier
-                        .clip(RoundedCornerShape(16.dp))
+                        .clip(shape)
                         .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
                 }
             )
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            // 双保险：先按圆角裁切，再关闭 M3 默认 ripple。此前只在 clickable 上关
+            // indication，某些系统/焦点态仍会在选中条内部画出直角半透明矩形；
+            // 这里让任何后续绘制都被 16dp 圆角限制，选中反馈仍由变色 + 打勾承担。
+            .clip(shape)
+            // 部分系统会给带 Role.Button 的焦点节点画一个直角白色高亮框，
+            // 即使 indication=null 也照画。选项只靠点按使用，禁掉焦点即可彻底消失。
+            .focusProperties { canFocus = false }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary.copy(alpha = contentAlpha),
+            tint = (if (selected) accent else MaterialTheme.colorScheme.primary)
+                .copy(alpha = contentAlpha),
         )
         Spacer(Modifier.size(12.dp))
         Column(Modifier.weight(1f)) {
@@ -877,12 +920,21 @@ fun GlassChoiceRow(
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha),
+                color = (if (selected) accent else MaterialTheme.colorScheme.onSurface)
+                    .copy(alpha = contentAlpha),
             )
             Text(
                 subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha),
+            )
+        }
+        if (selected) {
+            Spacer(Modifier.size(8.dp))
+            Icon(
+                Icons.Rounded.Check,
+                contentDescription = "当前设置",
+                tint = accent.copy(alpha = contentAlpha),
             )
         }
     }
@@ -929,8 +981,16 @@ fun GlassChoiceDialog(
                     .appDialogSurface(RoundedCornerShape(26.dp))
                     .clickable(enabled = false, onClick = {}) // 吞掉点击，避免穿透到遮罩
                     .padding(horizontal = 20.dp, vertical = 18.dp),
-                content = content,
-            )
+            ) {
+                // title 之前只是形参、从未画出来：所有选择弹窗都少了标题。
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                content()
+            }
         }
     }
 }

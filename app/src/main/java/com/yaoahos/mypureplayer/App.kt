@@ -2,6 +2,8 @@ package com.yaoahos.mypureplayer
 
 import android.app.Application
 import android.os.StrictMode
+import com.yaoahos.mypureplayer.data.BackupPrefs
+import com.yaoahos.mypureplayer.data.CloudBackupScheduler
 import com.yaoahos.mypureplayer.data.Graph
 import com.yaoahos.mypureplayer.data.UpdateChecker
 import com.yaoahos.mypureplayer.data.UpdateLog
@@ -22,7 +24,28 @@ class App : Application() {
         super.onCreate()
         if (BuildConfig.DEBUG) installStrictMode()
         Graph.init(this)
+        restoreCloudBackupSchedule()
         autoCheckUpdate()
+    }
+
+    /**
+     * 每次启动把自动备份的周期恢复回来。
+     *
+     * WorkManager 自己的周期任务在重启后会保留，但用户可能清过数据/系统清理过后台任务；
+     * 这里用同一份唯一任务名重新登记。用 KEEP 而不是 UPDATE：已有任务保持原来的节奏，
+     * 不会被这次启动重置、更不会当场跑一轮把刚配好的（还可能是空的）配置抢先传上去；
+     * 只有任务真的丢了才会新建，新建同样推迟一个周期。
+     */
+    private fun restoreCloudBackupSchedule() {
+        bootScope.launch {
+            runCatching {
+                val config = BackupPrefs.get(this@App)
+                CloudBackupScheduler.ensure(
+                    this@App,
+                    if (config.autoBackupOn) config.autoHours else 0,
+                )
+            }
+        }
     }
 
     /**

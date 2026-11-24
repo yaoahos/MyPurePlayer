@@ -51,7 +51,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
@@ -61,9 +60,6 @@ import com.yaoahos.mypureplayer.data.MediaSource
 import com.yaoahos.mypureplayer.data.SortKey
 import com.yaoahos.mypureplayer.data.TrashEntry
 import com.yaoahos.mypureplayer.data.VideoItem
-import com.yaoahos.mypureplayer.ui.components.ActionDivider
-import com.yaoahos.mypureplayer.ui.components.ActionRow
-import com.yaoahos.mypureplayer.ui.components.AdaptiveSheet
 import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.EmptyState
 import com.yaoahos.mypureplayer.ui.components.InfoRow
@@ -84,6 +80,7 @@ import com.yaoahos.mypureplayer.ui.components.VideoGridCard
 import com.yaoahos.mypureplayer.ui.components.VideoListRow
 import com.yaoahos.mypureplayer.ui.components.adaptiveMediaGridMinSize
 import com.yaoahos.mypureplayer.ui.components.appGlass
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import com.yaoahos.mypureplayer.ui.components.listRowMinSize
 import com.yaoahos.mypureplayer.ui.local.startPlayback
@@ -109,7 +106,8 @@ fun TrashScreen(navController: NavHostController) {
 
     var confirmClear by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<List<TrashEntry>?>(null) }
-    // 点按/长按卡片都会选中该条并弹出动作面板；面板关闭后点按其它条目继续加选。
+    // 单击视频直接播放、长按进入选择态 —— 与本地/历史/保险箱全站一致。
+    // 选中后由底部那套四格操作栏（播放/详情/恢复/彻底删除）接管，不再另起一套菜单。
     val selection = remember { ListSelection() }
     var infoTarget by remember { mutableStateOf<TrashEntry?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -158,13 +156,19 @@ fun TrashScreen(navController: NavHostController) {
     fun onEntryClick(entry: TrashEntry) {
         if (selection.active) {
             selection.toggle(entry.id.toString())
+        } else if (!entry.isFolder) {
+            // 单击视频 = 播放（与本地/历史/保险箱一致）。先闪一下再跳播放器。
+            // 回收站里的文件是完整搬到暂存区的，可直接播放，不必先恢复。
+            flashClick { startPlayback(navController, entryItem(entry)) }
         } else {
-            // 回收站里点按与长按都只是进入选择态，动作放到顶栏 + 底部操作栏。
+            // 文件夹没法直接播放：单击进入选择态，用底部操作条恢复/删除。
             selection.enter(entry.id.toString())
         }
     }
 
     fun onEntryLongClick(entry: TrashEntry) {
+        // 长按进入选择态，由底部四格操作栏（播放/详情/恢复/彻底删除）接管。
+        // 已在多选态时长按只切换勾选，与全站其它列表一致。
         selection.enter(entry.id.toString())
     }
 

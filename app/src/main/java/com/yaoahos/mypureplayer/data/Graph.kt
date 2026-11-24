@@ -98,6 +98,9 @@ object Graph {
         Playback.dropDeletedFromQueue(gone)
         // 自建播放列表里的同一批条目也要摘掉，否则点进去是一条播不了的死记录
         playlists.dropGone(gone)
+        // 本地列表同样要立刻收紧。MediaStore 的删除通知是异步的，等下一次 scan 太晚；
+        // 用户在文件管理器里删的文件更是只会留下一条永远刷不掉的陈旧行。
+        local.dropGone(gone)
         gone.forEach { item ->
             val path = item.localPath ?: return@forEach
             val position = history.resumePosition(item.id, item.source)

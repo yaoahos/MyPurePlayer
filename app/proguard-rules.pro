@@ -7,6 +7,15 @@
     public static int isLoggable(...);
 }
 
+# ---------------------------------------------------------------- WorkManager / Room
+# 自动备份用 WorkManager 持久化任务，它内部用 Room 建库。Room 在运行时通过反射
+# 调用生成的 WorkDatabase_Impl 无参构造；R8 会把这个构造改名或裁掉，表现是
+# 应用一启动就崩：NoSuchMethodException: androidx.work.impl.WorkDatabase_Impl.<init> []
+# （debug 不混淆所以看不出来，只有 release 包会遇到）。
+-keep class androidx.work.impl.WorkDatabase_Impl { *; }
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
+-keepnames class * extends androidx.room.RoomDatabase
+
 # ---------------------------------------------------------------- libass / Media3
 # libass 的 JNI 绑定（ass-kt / ass-media）按类名/方法名查找 native 方法，不能被裁剪
 -keep class io.github.peerless2012.ass.** { *; }

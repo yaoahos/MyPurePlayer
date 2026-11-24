@@ -62,10 +62,10 @@ class SmbRandomReader internal constructor(
         val want = minOf(length.toLong(), totalLength - pos, maxChunk.toLong()).toInt()
         val n = try {
             file.read(buffer, pos, offset, want)
-        } catch (t: Throwable) {
-            // 服务器不认这么大的 READ（各家 MaxReadSize 不同）时降回保守值重试一次，
-            // 之后所有读都按降级后的块长走，不再反复撞同一个限制
-            if (maxChunk > FALLBACK_CHUNK) {
+        } catch (t: Exception) {
+            // 只有 STATUS_INVALID_PARAMETER 才是「服务器不认这么大的 READ」。
+            // 断网/权限错误等过去也会被误判成块长问题，白跑一次失败往返，还永久降到 512KB。
+            if (maxChunk > FALLBACK_CHUNK && SmbErrors.isInvalidParameter(t)) {
                 maxChunk = FALLBACK_CHUNK
                 return readLocked(pos, buffer, offset, length)
             }

@@ -3,6 +3,7 @@ package com.yaoahos.mypureplayer.ui.more
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -30,7 +36,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,9 +54,14 @@ import androidx.navigation.NavHostController
 import com.yaoahos.mypureplayer.core.Formats
 import com.yaoahos.mypureplayer.data.AppSettings
 import com.yaoahos.mypureplayer.data.Graph
+import com.yaoahos.mypureplayer.data.PlayModes
 import com.yaoahos.mypureplayer.media.Thumbnails
 import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
+import com.yaoahos.mypureplayer.ui.components.glassPressable
+import com.yaoahos.mypureplayer.ui.components.glassToggleable
+import com.yaoahos.mypureplayer.ui.components.GlassChoiceDialog
+import com.yaoahos.mypureplayer.ui.components.GlassChoiceRow
 import com.yaoahos.mypureplayer.ui.theme.ThemePalette
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
@@ -72,6 +82,7 @@ fun SettingsScreen(navController: NavHostController) {
     val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     var cacheSize by remember { mutableStateOf(Thumbnails.diskUsage(context)) }
     var confirmClearCache by remember { mutableStateOf(false) }
+    var playModeDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         // 透明容器：背景由根部的常驻玻璃层统一绘制，内部页面与底栏页共用同一张底
@@ -178,6 +189,29 @@ fun SettingsScreen(navController: NavHostController) {
             }
 
             SettingsGroup("播放") {
+                // 播放顺序放在「自动加载同名字幕」上方：它是整组播放行为的入口，
+                // 先决定怎么播，再决定字幕/解码这些播的时候怎么呈现。
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .glassPressable(onClick = { playModeDialog = true })
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "播放顺序",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "${PlayModes.label(settings.playMode)}：${PlayModes.description(settings.playMode)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 SettingsSwitchRow(
                     title = "自动加载同名字幕",
                     subtitle = "播放时自动加载同目录下的同名字幕",
@@ -189,12 +223,6 @@ fun SettingsScreen(navController: NavHostController) {
                     subtitle = "关闭后使用软件解码，兼容性更好但更耗电",
                     checked = settings.hardwareDecode,
                     onCheckedChange = { scope.launch { Graph.settings.setHardwareDecode(it) } },
-                )
-                SettingsSwitchRow(
-                    title = "自动播放下一个",
-                    subtitle = "单个视频结束后，自动播放列表中的下一个",
-                    checked = settings.autoPlayNext,
-                    onCheckedChange = { scope.launch { Graph.settings.setAutoPlayNext(it) } },
                 )
                 SettingsSwitchRow(
                     title = "记忆播放进度",
@@ -212,48 +240,80 @@ fun SettingsScreen(navController: NavHostController) {
 
             SettingsGroup("存储") {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .glassPressable(onClick = { confirmClearCache = true })
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("视频缩略图缓存", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "视频缩略图缓存",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        )
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            if (cacheSize > 0) Formats.formatSize(cacheSize) else "暂无缓存",
+                            "点击清除；当前 ${if (cacheSize > 0) Formats.formatSize(cacheSize) else "暂无缓存"}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }
-                    // 只留文字按钮：图标 + 文字并排时两者基线对不齐，看着比左侧两行文字更"飘"
-                    TextButton(
-                        onClick = { confirmClearCache = true },
-                    ) {
-                        Text("清除")
                     }
                 }
             }
 
             SettingsGroup("备份与恢复") {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .glassPressable(onClick = { navController.navigate(Routes.BACKUP) })
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("配置备份", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "配置备份",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        )
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            "主题、选项、SMB 与串流、历史与播放列表；本地文件或 WebDAV，加密保存",
+                            "主题、选项、SMB 与串流、历史与播放列表；本地文件或 WebDAV，可按设备自动备份",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }
-                    TextButton(onClick = { navController.navigate(Routes.BACKUP) }) {
-                        Text("打开")
                     }
                 }
             }
 
             Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    if (playModeDialog) {
+        GlassChoiceDialog(title = "播放顺序", onDismiss = { playModeDialog = false }) {
+            listOf(
+                PlayModes.NO_AUTO to Icons.Rounded.Pause,
+                PlayModes.SEQUENCE to Icons.Rounded.SkipNext,
+                PlayModes.LOOP_ALL to Icons.Rounded.Repeat,
+                PlayModes.LOOP_ONE to Icons.Rounded.RepeatOne,
+                PlayModes.SHUFFLE to Icons.Rounded.Shuffle,
+            ).forEach { (mode, icon) ->
+                GlassChoiceRow(
+                    icon = icon,
+                    title = PlayModes.label(mode),
+                    subtitle = PlayModes.description(mode),
+                    selected = settings.playMode == mode,
+                    onClick = {
+                        playModeDialog = false
+                        if (settings.playMode != mode) {
+                            scope.launch { Graph.settings.setPlayMode(mode) }
+                            Notice.success("已设为${PlayModes.label(mode)}")
+                        }
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+            }
         }
     }
 
@@ -335,14 +395,12 @@ private fun SettingsSwitchRow(
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
-        // 整行 toggleable：点文字也能切换，Switch 的 onCheckedChange 置空避免双重焦点
+        // 整行 toggleable：点文字也能切换，Switch 的 onCheckedChange 置空避免双重焦点。
+        // 走 glassToggleable：原生 toggleable 的按压波纹是直角矩形，在圆角玻璃卡里会
+        // 露出一块方形高亮/白框，改为同圆角的淡色按压片。
         Modifier
             .fillMaxWidth()
-            .toggleable(
-                value = checked,
-                role = Role.Switch,
-                onValueChange = onCheckedChange,
-            )
+            .glassToggleable(value = checked, onValueChange = onCheckedChange)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -396,8 +454,10 @@ private fun PalettePicker(
                             Modifier
                         },
                     )
-                    .clickable(
+                    .glassPressable(
                         role = Role.RadioButton,
+                        // 色点是 34dp 的正圆：圆角取一半，按压淡片才与色点同形
+                        radius = 17.dp,
                         onClickLabel = palette.label,
                     ) { onSelect(palette) },
                 contentAlignment = Alignment.Center,

@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.first
@@ -11,12 +13,15 @@ import kotlinx.coroutines.flow.first
 private val Context.backupDataStore: DataStore<Preferences> by preferencesDataStore(name = "backup")
 
 /**
- * WebDAV 备份目标。
+ * 云端备份目标与自动备份设置。
  *
  * url 只到主机与路径（例如 `dav.example.com/dav`），port 单独填（默认按协议 443/80），
- * 真正的文件地址 = 地址（含端口）/ 目录 / 固定文件名。
+ * 真正的文件地址 = 地址（含端口）/ 目录 / 按设备生成的文件名。
  * folder 是服务器上的目录名，默认取应用名，可改成已有目录；不填就落在地址所在目录。
- * password 在内存里是明文，落盘时用独立的 Keystore 密钥加密。
+ *
+ * [password] 是 WebDAV 账号密码，[backupPassword] 是给备份文件加密的口令。
+ * 两者在内存里是明文，落盘时用独立的 Keystore 密钥加密——云端备份要能定时在后台跑，
+ * 就必须能在没有用户输入的情况下取到口令；Keystore 绑本机，换设备后解不开也拿不走。
  */
 data class WebDavConfig(
     val url: String = "",
@@ -24,7 +29,25 @@ data class WebDavConfig(
     val folder: String = ConfigBackup.DEFAULT_FOLDER,
     val username: String = "",
     val password: String = "",
-)
+    val backupPassword: String = "",
+    /** 云端文件名里的设备名；空串表示还没改过，取设备型号 */
+    val deviceName: String = "",
+    /** 自动备份周期（小时），0 = 关闭 */
+    val autoHours: Int = DEFAULT_AUTO_HOURS,
+    val lastSyncAt: Long = 0L,
+    val lastResult: String = "",
+) {
+    val configured: Boolean get() = url.isNotBlank()
+
+    /** 真正会跑自动备份：连接填了、周期不是关闭、口令也在 */
+    val autoBackupOn: Boolean
+        get() = configured && autoHours > 0 && backupPassword.length >= BackupCrypto.MIN_PASSWORD
+
+    companion object {
+        /** 默认每天一次：配好地址与口令就该「配完即生效」，不必再回来拨一次开关 */
+        const val DEFAULT_AUTO_HOURS = 24
+    }
+}
 
 object BackupPrefs {
 
@@ -34,6 +57,13 @@ object BackupPrefs {
         val folder = stringPreferencesKey("webdav_folder")
         val username = stringPreferencesKey("webdav_username")
         val password = stringPreferencesKey("webdav_password")
+        val backupPassword = stringPreferencesKey("backup_cipher")
+        val deviceName = stringPreferencesKey("backup_device_name")
+        val deviceId = stringPreferencesKey("backup_device_id")
+        val lastFile = stringPreferencesKey("backup_last_file")
+        val autoHours = intPreferencesKey("backup_auto_hours")
+        val lastSyncAt = longPreferencesKey("backup_last_sync_at")
+        val lastResult = stringPreferencesKey("backup_last_result")
     }
 
     // 与 SMB 用不同的 Keystore 别名：一个凭据泄露/换钥匙不该波及另一处
@@ -59,6 +89,11 @@ object BackupPrefs {
             folder = prefs[Keys.folder] ?: ConfigBackup.DEFAULT_FOLDER,
             username = prefs[Keys.username].orEmpty(),
             password = cipher.decrypt(prefs[Keys.password].orEmpty()),
+            backupPassword = cipher.decrypt(prefs[Keys.backupPassword].orEmpty()),
+            deviceName = prefs[Keys.deviceName].orEmpty(),
+            autoHours = prefs[Keys.autoHours] ?: WebDavConfig.DEFAULT_AUTO_HOURS,
+            lastSyncAt = prefs[Keys.lastSyncAt] ?: 0L,
+            lastResult = prefs[Keys.lastResult].orEmpty(),
         )
     }
 
@@ -69,6 +104,37 @@ object BackupPrefs {
             it[Keys.folder] = config.folder.trim().trim('/')
             it[Keys.username] = config.username.trim()
             it[Keys.password] = cipher.encrypt(config.password)
+            it[Keys.backupPassword] = cipher.encrypt(config.backupPassword)
+            // 设备名落盘时补全默认值：定时任务在后台跑，不能依赖界面先算一遍
+            it[Keys.deviceName] = DeviceProfile.displayName(config.deviceName)
+            it[Keys.autoHours] = config.autoHours
+        }
+    }
+
+    /**
+     * 本机短码：首次生成后不再变。改名只影响文件名前半段，短码始终能区分同型号设备。
+     */
+    suspend fun deviceId(context: Context): String {
+        context.backupDataStore.data.first()[Keys.deviceId]
+            ?.takeIf { it.length == 4 }
+            ?.let { return it }
+        val generated = DeviceProfile.newId()
+        context.backupDataStore.edit { it[Keys.deviceId] = generated }
+        return generated
+    }
+
+    /** 上次成功上传用的文件名：改名后据此把旧文件清掉，不在云端留幽灵设备。 */
+    suspend fun lastFileName(context: Context): String =
+        context.backupDataStore.data.first()[Keys.lastFile].orEmpty()
+
+    suspend fun markFileName(context: Context, fileName: String) {
+        context.backupDataStore.edit { it[Keys.lastFile] = fileName }
+    }
+
+    suspend fun markSync(context: Context, at: Long, result: String) {
+        context.backupDataStore.edit {
+            it[Keys.lastSyncAt] = at
+            it[Keys.lastResult] = result
         }
     }
 }

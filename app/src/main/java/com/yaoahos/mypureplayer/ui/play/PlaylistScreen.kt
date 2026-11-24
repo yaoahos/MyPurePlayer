@@ -6,6 +6,9 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,12 +71,14 @@ import com.yaoahos.mypureplayer.ui.components.GlassChoiceRow
 import com.yaoahos.mypureplayer.ui.components.GlassFab
 import com.yaoahos.mypureplayer.ui.components.ListSelection
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
 import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
+import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
 import com.yaoahos.mypureplayer.ui.components.selectionCardOutline
 import kotlinx.coroutines.launch
 
@@ -135,7 +140,7 @@ fun PlaylistScreen(navController: NavHostController) {
             } else {
                 PageTopBar(
                     title = "播放列表",
-                    subtitle = "正在播放 ${queue.size} 个 · 自建 ${playlists.size} 个",
+                    subtitle = "正在播放 ${queue.size} 个视频 · 自建 ${playlists.size} 个列表",
                     onBack = null,
                 )
             }
@@ -194,27 +199,38 @@ fun PlaylistScreen(navController: NavHostController) {
                     NowPlayingEntry(
                         count = queue.size,
                         enabled = !selection.active,
-                        onClick = { navController.navigate(Routes.playlistDetail(NOW_PLAYING_ID)) },
+                        onClick = { flashClick { navController.navigate(Routes.playlistDetail(NOW_PLAYING_ID)) } },
                     )
                 }
                 items(playlists, key = { "pl-${it.id}" }) { pl ->
                     val isSelected = selection.contains(pl.id)
+                    // 与其它列表页一样：按下有淡片，波纹关掉（矩形波纹压在圆角卡上很明显）
+                    val interaction = remember { MutableInteractionSource() }
+                    val pressed by interaction.collectPressedWithTap()
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .then(
                                 if (selection.active) {
-                                    Modifier.selectionCardOutline(selected = isSelected, selecting = true)
-                                } else Modifier.appGlassSurface(RoundedCornerShape(PageMetrics.CardRadius))
+                                    Modifier.selectionCardOutline(
+                                        selected = isSelected,
+                                        selecting = true,
+                                        pressed = pressed,
+                                    )
+                                } else {
+                                    Modifier.mediaCardOutline(pressed = pressed)
+                                }
                             )
                             .combinedClickable(
+                                interactionSource = interaction,
+                                indication = null,
                                 role = Role.Button,
                                 onClickLabel = if (selection.active) "选中/取消选择" else "打开",
                                 onLongClickLabel = "管理列表",
                                 onLongClick = { selection.enter(pl.id) },
                             ) {
                                 if (selection.active) selection.toggle(pl.id)
-                                else navController.navigate(Routes.playlistDetail(pl.id))
+                                else flashClick { navController.navigate(Routes.playlistDetail(pl.id)) }
                             }
                             .padding(horizontal = 14.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -396,7 +412,12 @@ private fun NowPlayingEntry(
         modifier = Modifier
             .fillMaxWidth()
             .appGlassSurface(RoundedCornerShape(PageMetrics.CardRadius))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .glassPressable(
+                enabled = enabled,
+                role = Role.Button,
+                radius = PageMetrics.CardRadius,
+                onClick = onClick,
+            )
             .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

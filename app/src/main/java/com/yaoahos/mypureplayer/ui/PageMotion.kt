@@ -78,6 +78,16 @@ object PageMotion {
      * 且弹簧走物理时间，不担心系统动画缩放。
      */
     val PageAlphaSpring = spring<Float>(dampingRatio = 0.92f, stiffness = 500f)
+
+    /**
+     * 播放页进出改用明确时长的 tween。
+     *
+     * 之前用弹簧尾巴偏长，画面像"黏"在屏幕上；而且 2026-11-22 慢放包已经证伪了
+     * "系统动画缩放会让 tween 变短" 的旧结论。进入稍慢一点、退出干脆一点，
+     * 与面板的 180~280ms 也同一量级。
+     */
+    val PlayerFadeIn = tween<Float>(durationMillis = 220, easing = Easing)
+    val PlayerFadeOut = tween<Float>(durationMillis = 200, easing = Easing)
 }
 
 /**

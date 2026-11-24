@@ -45,8 +45,14 @@ object SmbInput {
         if (s.isEmpty()) return Parsed("", "")
 
         val parts = s.split('/').filter { it.isNotBlank() }
-        // SMB 客户端不走自定义端口，这里把 :445 之类切掉
-        val host = parts.firstOrNull().orEmpty().substringBefore(':').trim()
+        // SMB 客户端不走自定义端口，这里把 :445 之类切掉；
+        // 但 IPv6 地址本身含冒号（fe80::1 / [fe80::1]:445），不能一刀切，否则会被截成 fe80。
+        val hostPart = parts.firstOrNull().orEmpty().trim()
+        val host = when {
+            hostPart.startsWith("[") -> hostPart.substringAfter('[').substringBefore(']')
+            hostPart.count { it == ':' } >= 2 -> hostPart
+            else -> hostPart.substringBefore(':')
+        }.trim()
         val share = parts.drop(1).joinToString("/").trim()
         return Parsed(host, share)
     }

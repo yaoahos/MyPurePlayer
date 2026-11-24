@@ -334,6 +334,19 @@ object SmbClient {
         return "smb://$auth${server.host}/$encodedPath"
     }
 
+    /**
+     * [playableUrl] 的「不含凭据」版本：MediaItem / DataSpec / 媒体会话里只放这一份。
+     * 路径仍保持百分号编码（与持久化 URL 一致），进程内凭据由 [SmbPlaybackRegistry] 关联。
+     */
+    fun playableUrlWithoutCredentials(rawUrl: String): String {
+        val body = rawUrl.removePrefix("smb://")
+        val slash = body.indexOf('/')
+        val host = (if (slash >= 0) body.substring(0, slash) else body).substringAfterLast('@')
+        if (host.isBlank()) return rawUrl
+        val path = if (slash >= 0) body.substring(slash) else ""
+        return "smb://$host$path"
+    }
+
     private fun encodeSegment(segment: String): String =
         URLEncoder.encode(segment, "UTF-8").replace("+", "%20")
 
@@ -351,11 +364,19 @@ object SmbClient {
      */
     fun nativeUrl(rawUrl: String): String {
         if (!rawUrl.startsWith("smb://", ignoreCase = true)) return rawUrl
-        val uri = Uri.parse(rawUrl)
-        val host = uri.host ?: return rawUrl
-        val segments = (uri.path ?: "/").split('/').filter { it.isNotEmpty() }
-        if (segments.isEmpty()) return "smb://$host/"
-        return "smb://$host/" + segments.joinToString("/")
+        // 不能用 Uri.parse().path：Android 的 Uri 会把 '#' 当 fragment、'?' 当 query，
+        // 而 SMB 文件名里这两个字符完全合法。浏览页产生的地址是原样拼接的（见 SmbPath.join），
+        // 一旦文件名带 # 或 ?，path 就在那里截断，SmbPath.split 拿到的共享内路径少一截，
+        // 表现为「进不去这个文件夹 / 这个视频打不开」。
+        // 这里手工切出 host，把 authority 之后整段都当路径，只解百分号、不解释分隔符。
+        val body = rawUrl.substring(6)
+        val slash = body.indexOf('/')
+        if (slash < 0) return rawUrl
+        val host = body.substring(0, slash).substringAfterLast('@')
+        if (host.isBlank()) return rawUrl
+        // playableUrl() 会做百分号编码，Uri.decode 只还原 %xx，不会把 '+' 误当空格
+        val path = Uri.decode(body.substring(slash))
+        return "smb://$host$path"
     }
 
     fun randomAccess(server: SmbServer, url: String): SmbRandomReader {

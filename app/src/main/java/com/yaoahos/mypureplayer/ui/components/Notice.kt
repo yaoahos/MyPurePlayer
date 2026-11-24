@@ -194,7 +194,7 @@ fun NoticeHost(modifier: Modifier = Modifier) {
                     ),
                     shape = shape,
                 )
-                .clickable { Notice.dismiss(message.id) }
+                .glassPressable(radius = 16.dp) { Notice.dismiss(message.id) }
                 .padding(horizontal = 13.dp, vertical = 11.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {

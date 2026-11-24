@@ -2,19 +2,25 @@ package com.yaoahos.mypureplayer.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import com.yaoahos.mypureplayer.ui.components.isDarkScheme
 import kotlin.math.pow
 
 /**
@@ -284,6 +290,7 @@ private fun Color.isUsableDynamicPrimary(): Boolean {
     return hsv[1] >= 0.20f
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MyPurePlayerTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -318,6 +325,31 @@ fun MyPurePlayerTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = AppTypography,
-        content = content,
-    )
+    ) {
+        // 全站波纹配色。
+        //
+        // M3 控件的默认波纹取 `onSurface` 的 10%：浅色主题下就是一层几乎看不见的灰，
+        // 压在同样是近白的玻璃卡上，实测只差 2~3/255 —— 用户反馈"图标按钮、文字按钮
+        // 点了没有任何反馈"。深色下是白 10%，同样偏淡。
+        //
+        // 这里把波纹的颜色与强度对齐到 [glassPressFill]：亮色 = 主题色 20%，
+        // 深色 = 白 12%。于是图标按钮、文字按钮、按钮、筛选片按下去的亮度，
+        // 和设置行、卡片上的按压淡片是同一个数值 —— 全站只有一种"按下去了"的颜色。
+        val pressColor = if (colorScheme.isDarkScheme()) Color.White else colorScheme.primary
+        val pressAlpha = if (colorScheme.isDarkScheme()) 0.12f else 0.20f
+        CompositionLocalProvider(
+            LocalRippleConfiguration provides RippleConfiguration(
+                color = pressColor,
+                rippleAlpha = RippleAlpha(
+                    pressedAlpha = pressAlpha,
+                    focusedAlpha = pressAlpha,
+                    draggedAlpha = pressAlpha,
+                    // 悬停（触控板/鼠标）刻意淡一档：它不等于"按下去"
+                    hoveredAlpha = 0.06f,
+                ),
+            ),
+        ) {
+            content()
+        }
+    }
 }

@@ -1,16 +1,21 @@
 package com.yaoahos.mypureplayer.data
 
 import android.util.Base64
+import org.w3c.dom.Element
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.text.SimpleDateFormat
+import java.util.Locale
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import javax.xml.parsers.DocumentBuilderFactory
 
 /**
  * 极简 WebDAV 客户端：只需要 MKCOL / PUT / GET / PROPFIND 几个动作，不为一个备份功能拖入 OkHttp。
@@ -29,6 +34,14 @@ object WebDavClient {
     private const val MAX_REDIRECTS = 3
 
     data class Result(val code: Int, val body: ByteArray)
+
+    /** 目录项：名字、大小、修改时间。云端备份靠它列出「各设备各一份」。 */
+    data class Entry(
+        val name: String,
+        val size: Long,
+        val modified: Long,
+        val isDir: Boolean,
+    )
 
     fun normalizeUrl(raw: String): String {
         val url = raw.trim().trimEnd('/')
@@ -73,6 +86,43 @@ object WebDavClient {
         }
     }
 
+    /**
+     * 列出目录内容（Depth: 1）。
+     *
+     * [allowMissing] 为真时把 404 当成「目录还不存在」返回空列表：这个目录是应用自己建的，
+     * 首次使用（一次都还没上传）时它本来就不存在，报「HTTP 404」只会让人以为备份坏了。
+     */
+    fun list(
+        dirUrl: String,
+        username: String,
+        password: String,
+        allowMissing: Boolean = true,
+    ): List<Entry> {
+        val url = normalizeUrl(dirUrl).trimEnd('/') + "/"
+        val body = (
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+                "<d:propfind xmlns:d=\"DAV:\"><d:prop>" +
+                "<d:resourcetype/><d:getcontentlength/><d:getlastmodified/>" +
+                "</d:prop></d:propfind>"
+            ).toByteArray(Charsets.UTF_8)
+        val result = request("PROPFIND", url, username, password, body, depth = 1)
+        if (result.code == 404 && allowMissing) return emptyList()
+        requireSuccess(result.code, "读取云端备份列表失败")
+        return parseEntries(String(result.body, Charsets.UTF_8), url)
+    }
+
+    /** GET 但把「没有这份文件」当成 null：覆写前取旧版做回滚点时不该因为首次上传而失败。 */
+    fun getOrNull(url: String, username: String, password: String): ByteArray? =
+        runCatching { get(url, username, password) }.getOrNull()
+
+    /** 删除云端文件；404 视为已经不存在。 */
+    fun delete(url: String, username: String, password: String) {
+        val result = request("DELETE", normalizeUrl(url), username, password, null)
+        if (result.code !in 200..299 && result.code != 404) {
+            throw IllegalStateException(describe(result.code, "删除云端备份失败"))
+        }
+    }
+
     fun describe(code: Int, fallback: String): String = when (code) {
         401 -> "认证失败，请检查账号密码"
         403 -> "没有访问权限，请检查 WebDAV 服务的权限设置"
@@ -88,6 +138,61 @@ object WebDavClient {
         if (code !in 200..299) throw IllegalStateException(describe(code, fallback))
     }
 
+    /** 解析 207 Multi-Status：取每个 response 的 href、大小与修改时间，跳过目录自身。 */
+    private fun parseEntries(xml: String, requestUrl: String): List<Entry> {
+        if (xml.isBlank()) return emptyList()
+        val doc = runCatching {
+            DocumentBuilderFactory.newInstance()
+                .apply { isNamespaceAware = true }
+                .newDocumentBuilder()
+                .parse(xml.byteInputStream(Charsets.UTF_8))
+        }.getOrElse { throw IllegalStateException("云端返回的目录列表无法解析") }
+
+        val nodes = doc.getElementsByTagNameNS("DAV:", "response")
+        val out = mutableListOf<Entry>()
+        for (i in 0 until nodes.length) {
+            val node = nodes.item(i) as? Element ?: continue
+            val href = childText(node, "DAV:", "href")
+            if (href.isBlank()) continue
+            val decoded = runCatching { URLDecoder.decode(href, "UTF-8") }.getOrDefault(href)
+            // 目录自身也会出现在列表里，跳过
+            val full = if (decoded.startsWith("http", true)) {
+                decoded
+            } else {
+                val base = runCatching { URI(requestUrl) }.getOrNull()
+                val origin = if (base != null) "${base.scheme}://${base.rawAuthority}" else ""
+                if (decoded.startsWith("/")) origin + decoded else "$origin/$decoded"
+            }
+            if (full.trimEnd('/') == requestUrl.trimEnd('/')) continue
+            val name = decoded.trimEnd('/').substringAfterLast('/')
+            if (name.isBlank()) continue
+
+            val prop = firstChild(node, "DAV:", "propstat")
+                ?.let { firstChild(it, "DAV:", "prop") }
+            val isDir = prop?.getElementsByTagNameNS("DAV:", "collection")?.length?.let { it > 0 } == true
+            val size = prop?.let { childText(it, "DAV:", "getcontentlength") }?.toLongOrNull() ?: 0L
+            val modified = prop?.let { childText(it, "DAV:", "getlastmodified") }
+                ?.let(::parseHttpDate) ?: 0L
+            out += Entry(name, size, modified, isDir)
+        }
+        return out
+    }
+
+    private fun childText(parent: Element, ns: String, tag: String): String {
+        val list = parent.getElementsByTagNameNS(ns, tag)
+        return if (list.length > 0) list.item(0).textContent.orEmpty().trim() else ""
+    }
+
+    private fun firstChild(parent: Element, ns: String, tag: String): Element? {
+        val list = parent.getElementsByTagNameNS(ns, tag)
+        return list.item(0) as? Element
+    }
+
+    /** WebDAV 的 getlastmodified 是 RFC 1123 格式，解析失败按 0 处理（只影响显示排序）。 */
+    private fun parseHttpDate(value: String): Long = runCatching {
+        SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).parse(value)?.time ?: 0L
+    }.getOrDefault(0L)
+
     private fun request(
         method: String,
         url: String,
@@ -95,6 +200,7 @@ object WebDavClient {
         password: String,
         body: ByteArray?,
         redirects: Int = 0,
+        depth: Int = 0,
     ): Result {
         val uri = runCatching { URI(url) }.getOrElse { throw IllegalArgumentException("WebDAV 地址格式不正确") }
         val scheme = uri.scheme?.lowercase() ?: throw IllegalArgumentException("WebDAV 地址格式不正确")
@@ -134,7 +240,7 @@ object WebDavClient {
                 head.append("Authorization: Basic ").append(token).append("\r\n")
             }
             if (method == "PROPFIND") {
-                head.append("Depth: 0\r\n")
+                head.append("Depth: ").append(depth).append("\r\n")
                 head.append("Content-Type: application/xml; charset=utf-8\r\n")
             } else if (body != null) {
                 // 备份内容已整体加密，就是一段不透明字节，不必声明成 json
@@ -179,7 +285,7 @@ object WebDavClient {
                     target.host?.equals(host, ignoreCase = true) != true ||
                     targetPort != port
                 ) return Result(code, bytes)
-                return request(method, target.toString(), username, password, body, redirects + 1)
+                return request(method, target.toString(), username, password, body, redirects + 1, depth)
             }
             return Result(code, bytes)
         } finally {

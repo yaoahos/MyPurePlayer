@@ -6,7 +6,8 @@ import androidx.activity.compose.BackHandler
 
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -161,6 +162,13 @@ fun NetworkScreen(navController: NavHostController) {
 
     BackHandler(enabled = selection.active) { selection.exit() }
 
+    // 搜索框的返回优先于退出页面：先收搜索框并清空关键词。
+    // 必须写在上面那条 BackHandler 之后——多条同时启用时，后组合的先拿到事件。
+    BackHandler(enabled = searchOpen) {
+        searchOpen = false
+        query = ""
+    }
+
     // 网络页要做「目录里有没有视频」的递归探测，同样吃 SMB 往返延迟，
     // 停留期间保持 Wi-Fi 低延迟（离开自动释放）。
     val perfContext = androidx.compose.ui.platform.LocalContext.current
@@ -286,7 +294,7 @@ fun NetworkScreen(navController: NavHostController) {
                             server = server,
                             onClick = {
                                 if (selection.active) selection.toggle(server.id.toString())
-                                else navController.navigate(Routes.smb(server.id, server.rootPath))
+                                else flashClick { navController.navigate(Routes.smb(server.id, server.rootPath)) }
                             },
                             onLongClick = { selection.enter(server.id.toString()) },
                             selected = selection.contains(server.id.toString()),
@@ -305,7 +313,7 @@ fun NetworkScreen(navController: NavHostController) {
                             server = server,
                             onClick = {
                                 if (selection.active) selection.toggle(server.id.toString())
-                                else navController.navigate(Routes.smb(server.id, server.rootPath))
+                                else flashClick { navController.navigate(Routes.smb(server.id, server.rootPath)) }
                             },
                             onLongClick = { selection.enter(server.id.toString()) },
                             selected = selection.contains(server.id.toString()),
@@ -424,7 +432,7 @@ private fun ServerCard(
     selecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         // 手机上单列满宽也只有三百多 dp，图位过宽会把「地址 · 账号」挤掉一半。
         // 窄卡片用紧凑图位，宽卡片（平板 2~3 列）维持与视频行一致的图位；
@@ -505,7 +513,7 @@ private fun ServerGridCard(
     selecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
     // 与视频 / 文件夹卡片完全同构：同一外框、同一 16:9 图形区、同一文字层级
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compact = maxWidth < 100.dp

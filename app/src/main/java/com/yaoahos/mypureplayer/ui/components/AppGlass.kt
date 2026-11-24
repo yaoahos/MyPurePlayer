@@ -1,17 +1,43 @@
 package com.yaoahos.mypureplayer.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.State
+import androidx.compose.ui.semantics.Role
+import kotlinx.coroutines.delay
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -448,9 +474,11 @@ fun Modifier.appGlassSurface(
     strong: Boolean = false,
     elevation: Dp = 2.dp,
     tinted: Boolean = false,
+    /** 显式指定面色：动作按钮用更深一档的 [AppGlassColors.fab]，与所在卡片拉开对比。 */
+    fillOverride: Color? = null,
 ): Modifier {
     val glass = appGlass()
-    val fill = when {
+    val fill = fillOverride ?: when {
         tinted -> glass.tintSoft
         strong -> glass.panelStrong
         else -> glass.panel
@@ -475,12 +503,13 @@ fun Modifier.appGlassSurface(
     }
 
     return this
-        .shadow(
-            elevation = elevation,
-            shape = shape,
-            ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-            spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.20f),
-        )
+        // 卡片不再用 Modifier.shadow。
+        //
+        // 玻璃片体的底是半透明的（panel alpha 0.66），而 shadow 画在片体**下面**：
+        // 投影的轮廓与模糊会被半透明的片体透出来，在卡片内侧形成一圈边界笔直的
+        // 暗色带 —— 上薄下厚，正是反复被提到的「玻璃条里多出来的一块直角矩形」。
+        // 卡片与页面的层次已经由上下两条亮/暗描边 + 片体自身的受光渐变表达，
+        // 去掉投影之后片体内部第一次是干净的。
         .clip(shape)
         .drawBehind {
             drawImage(
@@ -710,6 +739,68 @@ fun GlassFab(
 }
 
 /**
+ * 带边框的玻璃动作按钮（表单里的「测试 / 上传 / 恢复」这类次要操作）。
+ *
+ * 不用 `OutlinedButton`：它自带的描边会和 [appGlassSurface] 的上下亮暗双色描边重叠成两道边；
+ * 也不用 `TextButton`：没有片体、没有描边，在设置页那一片玻璃卡片里像一行裸文字。
+ * 这里让 M3 Button 只负责点击/焦点/禁用态，外观全部交给玻璃修饰符。
+ */
+@Composable
+fun GlassButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    /** 操作进行中：按钮内部显示转圈，替代页面上重复的「处理中…」文字。 */
+    loading: Boolean = false,
+) {
+    val glass = appGlass()
+    val shape = RoundedCornerShape(14.dp)
+    // 按钮面比卡片深半档即可：fab 那一档（0.742）压在 panel（0.852）上太重，
+    // 用户反馈「按钮颜色太深、像实色块」。取 panelStrong→fab 的中点，保留边框和
+    // 投影分层，仍是玻璃但不再是一块深色片。
+    val buttonFill = lerp(glass.panelStrong, glass.fab, 0.48f)
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier
+            .appGlassSurface(
+                shape = shape,
+                elevation = 1.dp,
+                fillOverride = if (enabled) buttonFill else glass.panelStrong,
+            )
+            .border(
+                width = 1.dp,
+                color = glass.accent.copy(alpha = if (enabled) 0.52f else 0.18f),
+                shape = shape,
+            ),
+        shape = shape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color.Transparent,
+            disabledContainerColor = Color.Transparent,
+            contentColor = glass.accent,
+            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+        ),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+        elevation = null,
+    ) {
+        // 固定最小内容宽度：转圈与文字宽度不同，切换时按钮不能忽宽忽窄挤动旁边按钮
+        Box(Modifier.widthIn(min = 40.dp), contentAlignment = Alignment.Center) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(17.dp),
+                    strokeWidth = 2.dp,
+                    color = if (enabled) glass.accent
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                )
+            } else {
+                Text(text, style = MaterialTheme.typography.labelLarge)
+            }
+        }
+    }
+}
+
+/**
  * 悬浮按钮的落点：右下角、离内容区底边 20dp。
  *
  * 底栏页（本地/网络/播放）的内容区已经让出了底栏高度，所以它就是"底栏上方 20dp"；
@@ -719,4 +810,335 @@ fun GlassFab(
  */
 object FabInsets {
     val margin = 20.dp
+}
+
+/**
+ * 全站点击反馈的**唯一规格**。
+ *
+ * 为什么要把圆角和时长收成一个对象：早先按压反馈散在七八处 —— 整行是 20%/12% 的淡片、
+ * 播放页的行是白 7%、卡片是切到 `tintSoft`（12%）、M3 控件是 `onSurface` 10% 的波纹，
+ * 圆角有 10/12/14/16 四种，亮起时长有的有动画有的没有。同一块玻璃按下去，
+ * 在不同页面看到的是四种不同的亮度与边界，看起来像四个不同的人做的。
+ *
+ * 现在颜色只有一份（[glassPressFill]）、强度动画只有一份（[glassPressLevel]）、
+ * 圆角只有一份（[GlassPress.radius]），行 / 卡片 / 弹窗选项 / 按钮全部引用这里。
+ */
+object GlassPress {
+    /** 按压淡片的圆角。与卡片自身 20dp 圆角相差 6dp，贴在卡内也读作同一族 */
+    val radius: Dp = 14.dp
+
+    /** 按下多快亮起：够快才像"跟手" */
+    const val RISE_MS = 60
+
+    /** 松开多久淡出：比亮起慢一档，收得自然 */
+    const val FALL_MS = 200
+
+    /** 松手后再停留，保证「按住—抬起」的交界处不闪断 */
+    const val HOLD_MS = 60L
+
+    /** 轻点兜底：亮多久（不含淡出）。110ms 在真机上仍然太短，容易被当成没反馈；180ms 刚好能看清一次闪动。 */
+    const val TAP_MS = 180L
+
+    /**
+     * 会立刻跳页 / 播放的卡片，点击动作要等一次闪动画出来再执行。
+     *
+     * 真机录屏确认：手指抬起与页面跳转落在同一帧时，卡片当场被销毁，
+     * 按压层一次都没画出来 —— 用户看到的就是"点了完全没反应"。
+     * 120ms 足够让淡片亮起，又不至于让列表点击显得迟钝。
+     */
+    const val ACTION_DELAY_MS = 120L
+}
+
+/**
+ * 「先闪后跳」：点击会立刻跳页/播放的列表项专用，等一次按压淡片亮起再执行动作。
+ *
+ * 与 Widgets.kt 里的 rememberFlashClick 同源（同一个 120ms + 主线程 Handler），
+ * 但做成无需 remember 的普通函数，供各页面自定义卡片在 onClick 里直接调用：
+ *   onClick = { flashClick { navController.navigate(...); play(...) } }
+ * 多选勾选这类不跳页、要即时跟手的分支不要包它。
+ */
+private val flashHandler = android.os.Handler(android.os.Looper.getMainLooper())
+fun flashClick(action: () -> Unit) {
+    flashHandler.postDelayed(action, GlassPress.ACTION_DELAY_MS)
+}
+
+/**
+ * 玻璃卡片内「整行可点」的圆角按压反馈。
+ *
+ * **为什么必须自己画**：M3 的默认 ripple 是一个按**矩形**铺满点击区域的填充。
+ * 整行可点的设置行 / 开关行横跨整张卡片，按下去就是一块直角半透明方块 ——
+ * 亮色下像"白色细框"，深色下像"矩形阴影"，压在圆角玻璃卡上一眼就是错的。
+ * 位置、宽度还随卡片内边距变化，越看越像没擦干净的图层。
+ *
+ * 所以这里彻底关掉 indication（`indication = null`，波纹一次都不画），
+ * 改由 `pressed` 状态画一层**同圆角**的主题色淡片：按下去有反馈，但边界永远跟着圆角走。
+ * 关闭 indication 也顺带消掉了部分 ROM 给可点节点补的直角焦点框。
+ *
+ * 用法：`Modifier.glassPressable(onClick = ...)`，不要再叠 `clickable`。
+ */
+@Composable
+fun Modifier.glassPressable(
+    enabled: Boolean = true,
+    role: Role? = Role.Button,
+    radius: Dp = GlassPress.radius,
+    /** 读屏用的动作说明（"打开文件夹""清除缓存"），与原生 clickable 的 onClickLabel 等价 */
+    onClickLabel: String? = null,
+    /**
+     * 覆盖按压色。只给**播放页浮层**用（那里永远是深色玻璃，全站按压色压上去会发灰），
+     * 其余一律留空，走 [glassPressFill]。
+     */
+    fillOverride: Color? = null,
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
+    // onClick 放最后：这样 `glassPressable { ... }` 的尾随 lambda 才会绑到它，
+    // 而不是绑到前面的 interactionSource（那是编译期才报错的坑）
+    onClick: () -> Unit,
+): Modifier {
+    // 点击计数：每次点击都驱动一次「闪一下」，不依赖按压事件是否完整送达
+    var clicks by remember { mutableIntStateOf(0) }
+    val level = pressLevel(interactionSource, enabled, clicks)
+    val base = glassPressFill(enabled)
+    val fill = if (fillOverride != null && enabled) fillOverride else base
+    return this
+        .clip(RoundedCornerShape(radius))
+        .background(fill.copy(alpha = fill.alpha * level))
+        .clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            enabled = enabled,
+            role = role,
+            onClickLabel = onClickLabel,
+            onClick = {
+                clicks++
+                onClick()
+            },
+        )
+}
+
+/**
+ * 玻璃上的图标按钮：圆形按压淡片 + 图标，替代 M3 [androidx.compose.material3.IconButton]。
+ *
+ * 为什么不用 IconButton：它的波纹是一个**按矩形铺满触控区**的状态层。默认尺寸下
+ * M3 自己会给它套一个圆形裁切，看起来正常；一旦调用方传了自己的 `size`
+ * （播放页那些 44/48dp 的工具钮就是这样），裁切就丢了 —— 按下去是一块**方形**亮斑。
+ * 播放页满屏深色，一块方斑比在任何地方都显眼。
+ *
+ * 这里把形状写死成圆（图标按钮本来就是圆的），按压色走全站同一份 [glassPressFill]，
+ * 播放页用 [fillOverride] 换成白。
+ */
+@Composable
+fun GlassIconButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    fillOverride: Color? = null,
+    content: @Composable () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    var clicks by remember { mutableIntStateOf(0) }
+    val level = pressLevel(interaction, enabled, clicks)
+    val base = glassPressFill(enabled)
+    val fill = if (fillOverride != null && enabled) fillOverride else base
+    Box(
+        modifier
+            // M3 IconButton 自带 48dp 最小触摸区；替换成自绘按钮时把这层丢了，
+            // 结果横屏顶栏五个图标挤成一团。这里补回来（调用方显式给 size 时以它为准）。
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .clip(androidx.compose.foundation.shape.CircleShape)
+            .background(fill.copy(alpha = fill.alpha * level))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                role = Role.Button,
+                onClick = {
+                    clicks++
+                    onClick()
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/**
+ * 与 [glassPressable] 同一套按压反馈，用于整行开关（[Role.Switch]）。
+ *
+ * Switch 自身仍需 `onCheckedChange = null`：状态由整行驱动，避免点击开关时切换两次。
+ */
+@Composable
+fun Modifier.glassToggleable(
+    value: Boolean,
+    enabled: Boolean = true,
+    role: Role? = Role.Switch,
+    radius: Dp = GlassPress.radius,
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
+    // 同 glassPressable：状态变化回调放最后，兼容尾随 lambda
+    onValueChange: (Boolean) -> Unit,
+): Modifier {
+    var clicks by remember { mutableIntStateOf(0) }
+    val level = pressLevel(interactionSource, enabled, clicks)
+    val fill = glassPressFill(enabled)
+    return this
+        .clip(RoundedCornerShape(radius))
+        .background(fill.copy(alpha = fill.alpha * level))
+        .toggleable(
+            value = value,
+            interactionSource = interactionSource,
+            indication = null,
+            enabled = enabled,
+            role = role,
+            onValueChange = {
+                clicks++
+                onValueChange(it)
+            },
+        )
+}
+
+/**
+ * 按压强度 0~1。
+ *
+ * 两路驱动，缺一条都会出问题：
+ *
+ *  1) **按住**：`isPressed` 为真时一直亮着，松手后再留 [PRESS_HOLD_MS] 才淡出
+ *     —— 长按能看出「手指还按在这里」。
+ *  2) **点击兜底**：轻点时按下与抬起常常落在同一帧里，Compose 会把它合并成一次
+ *     值变化，`isPressed` 甚至可能一次都不为真；反过来，若抬起事件因为重组丢了，
+ *     `isPressed` 又会一直停在 true —— 实测就是「点一下高亮常亮、再点一下才灭」。
+ *     所以这里再挂一路由点击次数驱动的定时闪烁：每次点击必定亮 [PRESS_TAP_MS]
+ *     然后熄灭，不管按压事件是否完整送达。
+ *
+ * 两路都只写 `lit`，最终一定会回到 false，不会留下常亮的高亮块。
+ */
+@Composable
+private fun pressLevel(
+    interactionSource: MutableInteractionSource,
+    enabled: Boolean,
+    clickTick: Int,
+): Float {
+    val pressed by interactionSource.collectIsPressedAsState()
+    var lit by remember { mutableStateOf(false) }
+
+    LaunchedEffect(pressed) {
+        if (pressed) {
+            lit = true
+        } else if (lit) {
+            delay(GlassPress.HOLD_MS)
+            lit = false
+        }
+    }
+
+    LaunchedEffect(clickTick) {
+        if (clickTick > 0) {
+            lit = true
+            delay(GlassPress.TAP_MS)
+            lit = false
+        }
+    }
+
+    val active = enabled && lit
+    val level by animateFloatAsState(
+        targetValue = if (active) 1f else 0f,
+        animationSpec = tween(durationMillis = if (active) GlassPress.RISE_MS else GlassPress.FALL_MS),
+        label = "glassPressLevel",
+    )
+    return level
+}
+
+/**
+ * 已有 `pressed` 布尔时的强度动画（卡片、列表项、播放页选项行走这一支）。
+ *
+ * 与 [pressLevel] 同一套 [GlassPress.RISE_MS] / [GlassPress.FALL_MS]：
+ * 卡片上按下与设置行的按下必须是同一个节奏，否则一屏之内两种手感。
+ */
+@Composable
+fun glassPressLevel(pressed: Boolean, enabled: Boolean = true): Float {
+    val active = enabled && pressed
+    val level by animateFloatAsState(
+        targetValue = if (active) 1f else 0f,
+        animationSpec = tween(durationMillis = if (active) GlassPress.RISE_MS else GlassPress.FALL_MS),
+        label = "glassPressLevelStatic",
+    )
+    return level
+}
+
+/**
+ * 「带点击兜底的按压状态」——卡片 / 列表项专用，替代裸的 [collectIsPressedAsState]。
+ *
+ * 轻点时按下与抬起常落在同一帧，Compose 合并后 `isPressed` 可能一次都不为真，
+ * 卡片就完全不亮（用户反馈「文件夹、视频、网络连接、播放列表点了没反应」）。
+ * [glassPressable] 正常是因为它在点击回调里另有一路 clickTick 强制闪一下；这里把
+ * 同一套兜底下沉到状态本身：按住走 isPressed，收到 [PressInteraction.Release] 就强制
+ * 亮 [GlassPress.TAP_MS] 再熄灭。返回布尔可直接喂给 [glassPressLevel]，调用方只换一行
+ * 采集函数，按压时长 / 颜色 / 圆角全部不变。
+ */
+@Composable
+fun MutableInteractionSource.collectPressedWithTap(): State<Boolean> {
+    val pressed by collectIsPressedAsState()
+    var tapped by remember { mutableStateOf(false) }
+    LaunchedEffect(this) {
+        interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) {
+                tapped = true
+                delay(GlassPress.TAP_MS)
+                tapped = false
+            }
+        }
+    }
+    return derivedStateOf { pressed || tapped }
+}
+
+/**
+ * 给已经自己处理点击（`combinedClickable` / 自带 `interactionSource` 的控件）
+ * 的玻璃面补一层同规格的按压淡片。
+ *
+ * 与 [glassPressable] 的区别：这个**不接管点击**，只负责画。
+ * 卡片的点击要带长按（多选），没法交给 [glassPressable]，但按压的观感必须一致。
+ */
+@Composable
+fun Modifier.glassPressOverlay(
+    pressed: Boolean,
+    shape: Shape = RoundedCornerShape(GlassPress.radius),
+    enabled: Boolean = true,
+    /**
+     * 是否把淡片画在内容上方。
+     *
+     * 视频卡的图片区是不透明的，按压层画在内容下面会被缩略图完全盖住 —— 用户看到的就是
+     * 「视频点了没反应」。这类带不透明内容的卡片必须传 true；纯文字行保持 false，
+     * 避免按压时把文字也染上一层色。
+     */
+    foreground: Boolean = false,
+): Modifier {
+    val level = glassPressLevel(pressed, enabled)
+    if (level <= 0.002f) return this
+    // 内容上方的淡片不能用主题色：视频缩略图常常就是同一种蓝，压上去几乎看不出变化。
+    // 这里改用中性明暗膜（亮色主题压暗、深色主题提亮），在任何画面上都能读出"按下去了"。
+    // 内容下方的普通淡片仍然走全站的主题色规格。
+    val fill = if (foreground && enabled) {
+        if (appGlass().isDark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.12f)
+    } else {
+        glassPressFill(enabled)
+    }
+    val color = fill.copy(alpha = fill.alpha * level)
+    return if (foreground) {
+        this.clip(shape).drawWithContent {
+            drawContent()
+            drawRect(color)
+        }
+    } else {
+        this.background(color, shape)
+    }
+}
+
+/**
+ * 按压淡片：亮色下用主题色、深色下用白。
+ *
+ * 透明度不能再压得太低：10% 主题色压在同样是淡蓝的玻璃卡上，实测只差 2~3/255，
+ * 手指按下去几乎看不出变化（用户反馈「点击时没有按压提示」）。现在亮色 20%、
+ * 深色 12%，在卡片自身的蓝底上能读出一块明确的「按下去了」的色片，
+ * 又不会盖住文字。
+ */
+@Composable
+fun glassPressFill(enabled: Boolean = true): Color {
+    if (!enabled) return Color.Transparent
+    val glass = appGlass()
+    return if (glass.isDark) Color.White.copy(alpha = 0.12f) else glass.tint.copy(alpha = 0.20f)
 }

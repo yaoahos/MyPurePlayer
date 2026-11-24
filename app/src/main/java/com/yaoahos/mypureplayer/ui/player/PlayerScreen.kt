@@ -24,6 +24,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -60,6 +61,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
+import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.Info
@@ -69,6 +71,9 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.SkipNext
@@ -81,7 +86,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -108,7 +112,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -128,12 +131,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import com.yaoahos.mypureplayer.core.Formats
 import com.yaoahos.mypureplayer.data.MediaSource
+import com.yaoahos.mypureplayer.data.PlayModes
 import com.yaoahos.mypureplayer.data.SubtitleFile
 import com.yaoahos.mypureplayer.data.SubtitleTrack
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.media.Thumbnails
 import com.yaoahos.mypureplayer.playback.Playback
 import com.yaoahos.mypureplayer.ui.components.DurationBadge
+import com.yaoahos.mypureplayer.ui.components.GlassIconButton
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import java.io.File
 import com.yaoahos.mypureplayer.ui.components.VideoThumb
 import kotlinx.coroutines.delay
@@ -156,6 +162,28 @@ private sealed interface GestureHud {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+/**
+ * 播放页的图标按钮：圆形白色按压淡片，替代 M3 IconButton 的方形波纹。
+ *
+ * 播放页所有按钮都压在视频/深色浮层上，M3 默认的 ripple 在这里既偏暗又是方形
+ * （调用方传了自定义 size，M3 自带的圆形裁切就失效了）。全站按压色在浅色主题下是
+ * 主题色 20%，压在深色画面上会发灰；这里统一换成白 12%，与侧栏里 [GlassRow] 的按压同一档。
+ */
+@Composable
+private fun PlayerIconButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
+) = GlassIconButton(
+    onClick = onClick,
+    modifier = modifier,
+    enabled = enabled,
+    fillOverride = com.yaoahos.mypureplayer.ui.player.PlayerPressFill,
+    content = content,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(navController: NavHostController) {
     val context = LocalContext.current
@@ -174,12 +202,29 @@ fun PlayerScreen(navController: NavHostController) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
     val activity = remember(context) { context.findActivity() }
+    val exitView = LocalView.current
+
+    /**
+     * 退出播放页前的准备：记录进度，但不马上暂停、不马上恢复系统栏布局。
+     *
+     * 淡出的 200ms 里画面继续播放，底下那层先把系统栏/顶栏的位置占好；
+     * 等播放器淡没了，用户看到的是已经稳定的列表页，而不是"淡出结束才啪地跳一下"。
+     * 真正暂停仍由 DisposableEffect.onDispose 兜底，不会漏掉后台声音。
+     */
+    fun preparePlayerExit() {
+        Playback.onScreenLeave(pause = false)
+        val window = exitView.context.findActivity()?.window ?: return
+        WindowCompat.getInsetsController(window, exitView)
+            ?.show(WindowInsetsCompat.Type.systemBars())
+    }
 
     var controlsVisible by remember { mutableStateOf(true) }
     var locked by remember { mutableStateOf(false) }
     var showTracks by remember { mutableStateOf(false) }
     var trackTab by remember { mutableStateOf(0) } // 0 字幕 / 1 音轨
     var showQueue by remember { mutableStateOf(false) }
+    // 播放顺序独立按钮：只改当前队列，不写全局设置，也不再塞进播放列表面板
+    var showQueuePlayMode by remember { mutableStateOf(false) }
     var showSpeed by remember { mutableStateOf(false) }
     var showCast by remember { mutableStateOf(false) }
     var showDecode by remember { mutableStateOf(false) }
@@ -189,7 +234,7 @@ fun PlayerScreen(navController: NavHostController) {
     var showLocalSubs by remember { mutableStateOf(false) }
     // 任一浮层（底部面板 / 侧栏 / 对话框）打开时为 true。
     // 页面中央的提示在这种情况下会被整个盖住，没有显示意义，统一据此判断。
-    val modalOpen = showTracks || showQueue || showSpeed || showCast ||
+    val modalOpen = showTracks || showQueue || showQueuePlayMode || showSpeed || showCast ||
         showDecode || showInfo || showTopMore || showNetSubs || showLocalSubs
     var rotationMode by remember { mutableStateOf<RotationMode?>(null) }
     var scrubbing by remember { mutableStateOf<Float?>(null) }
@@ -345,9 +390,10 @@ fun PlayerScreen(navController: NavHostController) {
     // BackHandler 才会被禁用，避免出现「弹窗还开着就退出视频」。
     // 竖屏时顶栏「更多」弹出的短菜单尤其容易被漏掉，之前就会直接退出播放。
     val anyOverlay = showInfo || showCast || showDecode || showSpeed || showQueue ||
-        showTracks || showTopMore || showNetSubs || showLocalSubs
+        showQueuePlayMode || showTracks || showTopMore || showNetSubs || showLocalSubs
     BackHandler(enabled = anyOverlay) {
         when {
+            showQueuePlayMode -> showQueuePlayMode = false
             showNetSubs -> showNetSubs = false
             showLocalSubs -> showLocalSubs = false
             showTopMore -> showTopMore = false
@@ -363,7 +409,7 @@ fun PlayerScreen(navController: NavHostController) {
         }
     }
     BackHandler(enabled = !anyOverlay && !locked) {
-        Playback.onScreenLeave()
+        preparePlayerExit()
         navController.popBackStack()
     }
     // 锁定态不能让返回键直接退出 —— 锁定本来就是为了防误触。
@@ -374,7 +420,7 @@ fun PlayerScreen(navController: NavHostController) {
     BackHandler(enabled = locked && !anyOverlay) {
         val now = System.currentTimeMillis()
         if (now - lastLockedBackAt < 3_000L) {
-            Playback.onScreenLeave()
+            preparePlayerExit()
             navController.popBackStack()
         } else {
             lastLockedBackAt = now
@@ -600,6 +646,22 @@ fun PlayerScreen(navController: NavHostController) {
         // 等于同一个等待说了两遍，而且两个浮层都在画面中央偏下，看起来像叠在一起。
         // derivedStateOf：只在「是不是快进浮层」翻转时重组，拖动过程中 hud 每帧变化不会拖着整页重画
         val seekingHud by remember { derivedStateOf { hudState.value is GestureHud.Seek } }
+        // 暂停态的中央播放键：明确告诉用户"现在是暂停"，点一下继续。
+        // 只在静止、可交互时显示；加载圈、错误、手势提示、面板都不和它抢画面中央。
+        val centerPlayVisible by remember {
+            derivedStateOf {
+                !state.playing &&
+                    state.error == null &&
+                    !state.preparing &&
+                    !state.buffering &&
+                    !seekingHud &&
+                    hudState.value == null &&
+                    controlsVisible &&
+                    !locked &&
+                    !pipActive &&
+                    !modalOpen
+            }
+        }
         AnimatedVisibility(
             visible = (state.preparing || state.buffering) && state.error == null && !seekingHud,
             enter = fadeIn(),
@@ -636,6 +698,29 @@ fun PlayerScreen(navController: NavHostController) {
 
         GestureHudView(hudState)
 
+        AnimatedVisibility(
+            visible = centerPlayVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                PlayerIconButton(
+                    onClick = { Playback.togglePlay() },
+                    modifier = Modifier
+                        .size(72.dp)
+                        .background(Color.Black.copy(alpha = 0.42f), CircleShape),
+                ) {
+                    Icon(
+                        Icons.Rounded.PlayArrow,
+                        contentDescription = "继续播放",
+                        tint = Color.White,
+                        modifier = Modifier.size(36.dp),
+                    )
+                }
+            }
+        }
+
         state.error?.let { message ->
             Column(
                 Modifier
@@ -657,7 +742,7 @@ fun PlayerScreen(navController: NavHostController) {
         // 锁定按钮固定在右侧中间；锁定后同一个位置变成解锁，其余控件全部隐藏
         // 面板打开时锁定按钮也收起：它是控制条的一部分，留着会浮在玻璃面板里
         if (!locked && controlsVisible && !pipActive && !modalOpen) {
-            IconButton(
+            PlayerIconButton(
                 onClick = {
                     locked = true
                     controlsVisible = false
@@ -673,7 +758,7 @@ fun PlayerScreen(navController: NavHostController) {
             }
         }
         if (locked) {
-            IconButton(
+            PlayerIconButton(
                 onClick = { locked = false; controlsVisible = true },
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
@@ -702,8 +787,8 @@ fun PlayerScreen(navController: NavHostController) {
                     .padding(horizontal = 6.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = {
-                    Playback.onScreenLeave()
+                PlayerIconButton(onClick = {
+                    preparePlayerExit()
                     navController.popBackStack()
                 }) {
                     Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = Color.White)
@@ -727,7 +812,7 @@ fun PlayerScreen(navController: NavHostController) {
                 // "后台播放的按钮选中状态颜色是固定的，不跟随主题色变化"）。
                 val activeTint = playerGlass().accent
                 val castButton: @Composable () -> Unit = {
-                    IconButton(onClick = { openCast() }) {
+                    PlayerIconButton(onClick = { openCast() }) {
                         Icon(
                             Icons.Rounded.Cast,
                             contentDescription = "投屏到局域网设备",
@@ -736,7 +821,7 @@ fun PlayerScreen(navController: NavHostController) {
                     }
                 }
                 val audioButton: @Composable () -> Unit = {
-                    IconButton(onClick = { toggleBackgroundAudio() }) {
+                    PlayerIconButton(onClick = { toggleBackgroundAudio() }) {
                         Icon(
                             Icons.Rounded.Headphones,
                             contentDescription = if (state.backgroundAudio) "恢复画面" else "后台播放音频",
@@ -745,7 +830,7 @@ fun PlayerScreen(navController: NavHostController) {
                     }
                 }
                 val decodeButton: @Composable () -> Unit = {
-                    IconButton(onClick = { showDecode = true }) {
+                    PlayerIconButton(onClick = { showDecode = true }) {
                         Icon(
                             Icons.Rounded.Memory,
                             contentDescription = if (state.hardwareDecode) "当前硬件解码" else "当前软件解码",
@@ -754,35 +839,38 @@ fun PlayerScreen(navController: NavHostController) {
                     }
                 }
                 val subtitleButton: @Composable () -> Unit = {
-                    IconButton(onClick = { trackTab = 0; showTracks = true }) {
+                    PlayerIconButton(onClick = { trackTab = 0; showTracks = true }) {
+                        // 入口永远是亮的：有没有字幕是面板里的内容，不该用灰按钮提前下结论。
+                        // 之前把图标降到 60% 灰，用户看不到可点的入口，还以为功能被禁用了。
                         Icon(
                             Icons.Rounded.Subtitles,
                             contentDescription = "字幕与音轨",
-                            tint = if (
-                                state.hasSubtitles ||
-                                audioTracks.isNotEmpty() ||
-                                subtitleFiles.isNotEmpty()
-                            ) Color.White else Color.White.copy(alpha = 0.6f),
+                            tint = Color.White,
                         )
                     }
                 }
                 val infoButton: @Composable () -> Unit = {
-                    IconButton(onClick = { showInfo = true }) {
+                    PlayerIconButton(onClick = { showInfo = true }) {
                         Icon(Icons.Rounded.Info, contentDescription = "详情", tint = Color.White)
                     }
                 }
-                if (landscape) {
-                    castButton()
-                    audioButton()
-                    decodeButton()
-                    subtitleButton()
-                    infoButton()
-                } else {
-                    audioButton()
-                    subtitleButton()
-                    infoButton()
-                    IconButton(onClick = { showTopMore = true }) {
-                        Icon(Icons.Rounded.MoreVert, contentDescription = "更多", tint = Color.White)
+                // 右侧按钮组单独成行并给 2dp 间隔：这些按钮已经各占 48dp 触摸区，
+                // 紧贴时图标看着挤成一串；留一点缝既不牺牲触摸面积，视觉上也分得开。
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    if (landscape) {
+                        castButton()
+                        audioButton()
+                        decodeButton()
+                        subtitleButton()
+                        infoButton()
+                    } else {
+                        audioButton()
+                        subtitleButton()
+                        infoButton()
+                        PlayerIconButton(onClick = { showTopMore = true }) {
+                            Icon(Icons.Rounded.MoreVert, contentDescription = "更多", tint = Color.White)
+                        }
                     }
                 }
             }
@@ -933,18 +1021,18 @@ fun PlayerScreen(navController: NavHostController) {
                     )
                 }
 
-                // 播放控制与右下角工具放在同一行；窄屏时收起 ±10s，避免把播放键顶到上一行
+                // 播放控制与右下角工具放在同一行；±10s 已移除，进度拖动即可定位
                 BoxWithConstraints(Modifier.fillMaxWidth()) {
                     val narrow = maxWidth < 500.dp
-                    // 竖屏右侧只留「播放列表 + 小窗」两个工具（播放速度收进顶部更多菜单），
-                    // 播放控制就能真正居中；否则三组按钮会把播放键挤到屏幕左侧 1/4 处
-                    val centered = maxWidth >= 340.dp
+                    // 只有横屏才让播放控制居中。竖屏改成靠左：右侧工具组最多时有 6 个按钮，
+                    // 居中的播放键会和最左侧的播放列表按钮几乎贴在一起；靠左后两组各占一头。
+                    val centered = landscape && maxWidth >= 340.dp
                     Box(Modifier.fillMaxWidth().height(56.dp)) {
                         Row(
                             Modifier.align(if (centered) Alignment.Center else Alignment.CenterStart),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            IconButton(
+                            PlayerIconButton(
                                 onClick = { Playback.previous() },
                                 enabled = state.queueIndex > 0,
                                 modifier = Modifier.size(48.dp),
@@ -956,16 +1044,12 @@ fun PlayerScreen(navController: NavHostController) {
                                     modifier = Modifier.size(20.dp),
                                 )
                             }
-                            if (!narrow) {
-                                TextButton(onClick = { Playback.seekBy(-10_000) }) {
-                                    Text("−10s", color = Color.White, fontWeight = FontWeight.Medium)
-                                }
-                            }
-                            IconButton(
+                            PlayerIconButton(
                                 onClick = { Playback.togglePlay() },
+                                // 圆形底在玻璃控制条上看起来像一圈阴影，去掉后与上一个/下一个统一为纯图标；
+                                // 按压反馈仍由 GlassIconButton 的圆形淡片提供。
                                 modifier = Modifier
                                     .padding(horizontal = 4.dp)
-                                    .background(Color.White.copy(alpha = 0.14f), CircleShape)
                                     .size(if (narrow) 48.dp else 52.dp),
                             ) {
                                 Icon(
@@ -975,13 +1059,8 @@ fun PlayerScreen(navController: NavHostController) {
                                     modifier = Modifier.size(if (narrow) 28.dp else 30.dp),
                                 )
                             }
-                            if (!narrow) {
-                                TextButton(onClick = { Playback.seekBy(10_000) }) {
-                                    Text("+10s", color = Color.White, fontWeight = FontWeight.Medium)
-                                }
-                            }
                             val hasNext = state.queueIndex >= 0 && state.queueIndex < state.queueSize - 1
-                            IconButton(
+                            PlayerIconButton(
                                 onClick = { Playback.next() },
                                 enabled = hasNext,
                                 modifier = Modifier.size(48.dp),
@@ -995,7 +1074,7 @@ fun PlayerScreen(navController: NavHostController) {
                             }
                         }
 
-                        // 右下角顺序：播放列表 → 字幕音轨 → 播放速度 → 画面比例 → 小窗 → 旋转
+                        // 右下角顺序：播放列表 → 播放顺序 → 播放速度 → 画面比例 → 小窗 → 旋转
                         // 竖屏把触摸区收到 44dp、图标放大 1dp：按钮更紧凑但不难点，
                         // 给左侧播放控制腾出呼吸空间
                         val toolSize = if (narrow) 44.dp else 48.dp
@@ -1003,8 +1082,11 @@ fun PlayerScreen(navController: NavHostController) {
                         Row(
                             Modifier.align(Alignment.CenterEnd),
                             verticalAlignment = Alignment.CenterVertically,
+                            // 与横屏顶栏同一套 2dp 间隔：窄竖屏下这组工具最容易被挤成一串，
+                            // toolSize 已是 44dp 触摸区，加一点点缝不影响点击面积。
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
-                            IconButton(onClick = { showQueue = true }, modifier = Modifier.size(toolSize)) {
+                            PlayerIconButton(onClick = { showQueue = true }, modifier = Modifier.size(toolSize)) {
                                 Icon(
                                     Icons.AutoMirrored.Rounded.FormatListBulleted,
                                     contentDescription = "播放列表",
@@ -1012,10 +1094,29 @@ fun PlayerScreen(navController: NavHostController) {
                                     modifier = Modifier.size(toolIcon),
                                 )
                             }
+                            // 播放顺序独立成钮并放在播放列表右侧；图标绝不与列表的清单图标重复，
+                            // 顺序播放用「Sort」，其余模式沿用各自图标。改动只作用当前队列。
+                            PlayerIconButton(
+                                onClick = { showQueuePlayMode = true },
+                                modifier = Modifier.size(toolSize),
+                            ) {
+                                Icon(
+                                    imageVector = when (state.playMode) {
+                                        PlayModes.LOOP_ALL -> Icons.Rounded.Repeat
+                                        PlayModes.LOOP_ONE -> Icons.Rounded.RepeatOne
+                                        PlayModes.SHUFFLE -> Icons.Rounded.Shuffle
+                                        PlayModes.NO_AUTO -> Icons.Rounded.Pause
+                                        else -> Icons.AutoMirrored.Rounded.Sort
+                                    },
+                                    contentDescription = "播放顺序：${PlayModes.label(state.playMode)}",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(toolIcon),
+                                )
+                            }
                             // 竖屏右下角空间有限：速度入口移到顶部「更多」菜单，
-                            // 这里只留播放列表与小窗，播放控制才能居中
+                            // 这里压缩到 2~4 个工具，给左侧播放控制留出呼吸空间
                             if (!narrow) {
-                                IconButton(onClick = { showSpeed = true }, modifier = Modifier.size(toolSize)) {
+                                PlayerIconButton(onClick = { showSpeed = true }, modifier = Modifier.size(toolSize)) {
                                     Icon(
                                         Icons.Rounded.Speed,
                                         contentDescription = "播放速度",
@@ -1026,7 +1127,7 @@ fun PlayerScreen(navController: NavHostController) {
                             }
                             // 画面比例 / 旋转在窄竖屏时收进顶部溢出菜单，避免和左侧播放键挤在一起
                             if (!narrow) {
-                                IconButton(onClick = { cycleScale() }, modifier = Modifier.size(toolSize)) {
+                                PlayerIconButton(onClick = { cycleScale() }, modifier = Modifier.size(toolSize)) {
                                     Icon(
                                         Icons.Rounded.AspectRatio,
                                         contentDescription = "画面比例：${Playback.scaleLabel(state.scaleMode)}",
@@ -1035,7 +1136,7 @@ fun PlayerScreen(navController: NavHostController) {
                                     )
                                 }
                             }
-                            IconButton(onClick = { enterPictureInPicture() }, modifier = Modifier.size(toolSize)) {
+                            PlayerIconButton(onClick = { enterPictureInPicture() }, modifier = Modifier.size(toolSize)) {
                                 Icon(
                                     Icons.Rounded.PictureInPictureAlt,
                                     contentDescription = "小窗播放",
@@ -1044,7 +1145,7 @@ fun PlayerScreen(navController: NavHostController) {
                                 )
                             }
                             if (!narrow) {
-                                IconButton(onClick = { rotateScreen() }, modifier = Modifier.size(toolSize)) {
+                                PlayerIconButton(onClick = { rotateScreen() }, modifier = Modifier.size(toolSize)) {
                                     Icon(
                                         Icons.Rounded.ScreenRotation,
                                         contentDescription = "旋转屏幕",
@@ -1138,6 +1239,43 @@ fun PlayerScreen(navController: NavHostController) {
             },
             onDismiss = { showQueue = false },
         )
+    }
+
+    // 播放顺序独立按钮的浮层：与播放速度 / 解码方式 / 更多共用 PlayerPopupCard，
+    // 从右侧滑入，不再是一张居中的通用选择框。改动只作用当前队列。
+    PlayerPopupCard(
+        visible = showQueuePlayMode,
+        onDismiss = { showQueuePlayMode = false },
+        width = 268.dp,
+    ) {
+        GlassPanelHeader(
+            title = "播放顺序",
+            subtitle = "仅当前列表生效，不影响设置页",
+            onClose = { showQueuePlayMode = false },
+            compact = true,
+            inset = 10.dp,
+        )
+        Spacer(Modifier.height(4.dp))
+        listOf(
+            PlayModes.NO_AUTO to Icons.Rounded.Pause,
+            PlayModes.SEQUENCE to Icons.AutoMirrored.Rounded.Sort,
+            PlayModes.LOOP_ALL to Icons.Rounded.Repeat,
+            PlayModes.LOOP_ONE to Icons.Rounded.RepeatOne,
+            PlayModes.SHUFFLE to Icons.Rounded.Shuffle,
+        ).forEach { (mode, icon) ->
+            // 说明并进行内：两者同属一块玻璃，行距固定 2dp，选中时标题与说明一起变色
+            GlassRow(
+                title = PlayModes.label(mode),
+                subtitle = PlayModes.description(mode),
+                icon = icon,
+                selected = state.playMode == mode,
+                onClick = {
+                    showQueuePlayMode = false
+                    if (state.playMode != mode) Playback.setSessionPlayMode(mode)
+                },
+            )
+            Spacer(Modifier.height(4.dp))
+        }
     }
 
     // 字幕音轨：竖屏用底部面板；横屏与播放列表一致，放在右侧三分之一区域。
@@ -1261,8 +1399,10 @@ fun PlayerScreen(navController: NavHostController) {
                     style = MaterialTheme.typography.labelLarge,
                     color = glass.accent,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable {
+                        .glassPressable(
+                            radius = 12.dp,
+                            fillOverride = PlayerPressFill,
+                        ) {
                             Playback.stopDlnaDiscovery()
                             Playback.startDlnaDiscovery()
                         }
@@ -1514,48 +1654,23 @@ private fun GestureHudView(state: MutableState<GestureHud?>) {
 }
 
 /**
- * 浮层底：一层没有边界的径向暗晕。
- *
- * 拿掉玻璃卡片之后，白字落在明亮画面上会糊掉（实测 69% 那个数字压在浅色背景上几乎读不出）。
- * 但再塞回一张卡片又回到"塑料牌"的观感。折中做法是画一层**看不到边界**的暗晕：
- * 中心最深、向外渐隐到透明，读起来只是"这块画面暗了一点"。
- */
-private fun Modifier.hudGlow(): Modifier = drawBehind {
-    val radius = size.maxDimension * 0.72f
-    drawCircle(
-        brush = Brush.radialGradient(
-            0f to Color.Black.copy(alpha = 0.46f),
-            0.55f to Color.Black.copy(alpha = 0.30f),
-            1f to Color.Transparent,
-            center = center,
-            radius = radius,
-        ),
-        radius = radius,
-        center = center,
-    )
-}
-
-/**
  * 亮度 / 音量浮层：上方百分比、中间竖向条、下方图标。
  *
- * **不套玻璃面板**。早先这三条浮层（含快进、倍速）都包了一块 panelSolid 卡片，
- * 在画面上就是一张压上去的塑料牌，与播放页"轻"的控制层不是一套东西 —— 用户原话
- * "不应该使用玻璃面板，感觉很突兀"。现在用 [hudGlow] 的暗晕代替卡片底。
+ * **不套玻璃面板，也不加任何暗晕 / 文字投影**。此前为了亮画面可读性画了一层径向暗晕，
+ * 但那在视频上就是一块圆形阴影，用户明确要求去掉；现在和快进提示条保持同一种干净画法。
  */
 @Composable
 private fun LevelHud(icon: ImageVector, fraction: Float) {
     val glass = playerGlass()
     val value = fraction.coerceIn(0f, 1f)
     Column(
-        modifier = Modifier
-            .hudGlow()
-            .padding(horizontal = 26.dp, vertical = 20.dp),
+        modifier = Modifier.padding(horizontal = 26.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
             "${(value * 100).roundToInt()}%",
             color = Color.White,
-            style = MaterialTheme.typography.titleMedium.copy(shadow = HudTextShadow),
+            style = MaterialTheme.typography.titleMedium,
         )
         Spacer(Modifier.height(10.dp))
         Box(
@@ -1583,13 +1698,6 @@ private fun LevelHud(icon: ImageVector, fraction: Float) {
         )
     }
 }
-
-/** 浮层文字的统一投影：在亮画面上给白字一个底，替代不透明的卡片底 */
-private val HudTextShadow = Shadow(
-    color = Color.Black.copy(alpha = 0.72f),
-    offset = androidx.compose.ui.geometry.Offset(0f, 1.5f),
-    blurRadius = 10f,
-)
 
 /** 快进快退浮层：仍然是横向条，因为这里必须能读出目标时间。
  * 不加投影、不加暗晕：用户明确要求快进提示条保持干净，不要阴影。 */
@@ -1629,10 +1737,8 @@ private fun SpeedHud() {
     Text(
         "2\u00d7 倍速",
         color = Color.White,
-        style = MaterialTheme.typography.titleMedium.copy(shadow = HudTextShadow),
-        modifier = Modifier
-            .hudGlow()
-            .padding(horizontal = 26.dp, vertical = 18.dp),
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(horizontal = 26.dp, vertical = 18.dp),
     )
 }
 
@@ -1840,10 +1946,11 @@ private fun SheetRow(
                 if (selected) glass.selectedFill else Color.Transparent,
                 RoundedCornerShape(14.dp),
             )
-            .clickable(
+            .glassPressable(
                 enabled = enabled,
                 role = Role.Button,
                 onClickLabel = if (selected) "取消选择" else "选择",
+                fillOverride = PlayerPressFill,
             ) { onClick() }
             .padding(horizontal = 12.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1902,6 +2009,7 @@ private fun QueueSheet(
             inset = 8.dp,
         )
         Spacer(Modifier.height(8.dp))
+        // 播放顺序已独立到控制条按钮，播放列表只负责列视频，两者互不嵌套。
         LazyColumn(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1918,7 +2026,12 @@ private fun QueueSheet(
                             if (selected) glass.selectedFill
                             else Color.Transparent,
                         )
-                        .clickable(role = Role.Button, onClickLabel = "播放") { onSelect(index) }
+                        .glassPressable(
+                            role = Role.Button,
+                            radius = 16.dp,
+                            onClickLabel = "播放",
+                            fillOverride = PlayerPressFill,
+                        ) { onSelect(index) }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

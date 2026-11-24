@@ -10,7 +10,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -223,7 +224,7 @@ fun StreamsScreen(navController: NavHostController) {
                             stream = stream,
                             onClick = {
                                 if (selection.active) selection.toggle(stream.id.toString())
-                                else play(stream)
+                                else flashClick { play(stream) }
                             },
                             onLongClick = { selection.enter(stream.id.toString()) },
                             selected = selection.contains(stream.id.toString()),
@@ -321,12 +322,12 @@ private fun StreamRow(
     selecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
     Row(
         Modifier
             .fillMaxWidth()
             .let { base ->
-                if (selected) base.selectionCardOutline(selected = true, selecting = true)
+                if (selected) base.selectionCardOutline(pressed = pressed, selected = true, selecting = true)
                 else base.mediaCardOutline(pressed)
             }
             .combinedClickable(

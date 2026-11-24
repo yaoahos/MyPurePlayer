@@ -3,6 +3,9 @@ package com.yaoahos.mypureplayer.ui.network
 import androidx.activity.compose.BackHandler
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -74,6 +77,7 @@ import com.yaoahos.mypureplayer.ui.components.VideoThumb
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
 import com.yaoahos.mypureplayer.ui.components.appGlassBar
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.MediaFolderGridCard
 import com.yaoahos.mypureplayer.ui.components.MediaSectionLabel
 import com.yaoahos.mypureplayer.ui.components.ListRowContainer
@@ -271,6 +275,12 @@ fun SmbBrowserScreen(
     // 添加模式下选择态是常驻的：返回键应当直接退出页面，而不是"退选择"
     BackHandler(enabled = selection.active && !addMode) { selection.exit() }
 
+    // 搜索框打开时，返回键先关搜索框；写在上面之后才能优先于"退选择"。
+    BackHandler(enabled = searchOpen) {
+        searchOpen = false
+        query = ""
+    }
+
     val title = if (path.trimEnd('/') == activeServer.rootPath.trimEnd('/')) {
         activeServer.name
     } else {
@@ -458,9 +468,11 @@ fun SmbBrowserScreen(
                                 name = folder.name,
                                 checked = selection.contains("d:${folder.url}"),
                                 onEnterFolder = {
-                                    navController.navigate(
-                                        Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist)
-                                    )
+                                    flashClick {
+                                        navController.navigate(
+                                            Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist)
+                                        )
+                                    }
                                 },
                                 onToggle = { selection.toggle("d:${folder.url}") },
                             )
@@ -773,7 +785,12 @@ private fun AddModeFolderRow(
         Row(
             modifier = Modifier
                 .weight(1f)
-                .clickable(role = Role.Button, onClickLabel = "打开文件夹", onClick = onEnterFolder)
+                .glassPressable(
+                    role = Role.Button,
+                    radius = 12.dp,
+                    onClickLabel = "打开文件夹",
+                    onClick = onEnterFolder,
+                )
                 .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -805,11 +822,17 @@ private fun AddModeVideoRow(
     checked: Boolean,
     onToggle: () -> Unit,
 ) {
+    // 勾选态走 selected，按下态才算 pressed：早先借用 pressed 表示勾选，
+    // 一进页面被勾中的行就是"按下"色，真正按下去反而没有变化。
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectPressedWithTap()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .mediaCardOutline(pressed = checked)
+            .mediaCardOutline(pressed = pressed, selected = checked)
             .toggleable(
+                interactionSource = interaction,
+                indication = null,
                 value = checked,
                 role = Role.Checkbox,
                 onValueChange = { onToggle() },

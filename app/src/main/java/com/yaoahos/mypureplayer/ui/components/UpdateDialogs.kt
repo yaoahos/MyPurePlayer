@@ -23,7 +23,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -133,7 +132,7 @@ fun UpdateAvailableDialog(
     val showFade by remember {
         derivedStateOf { logScroll.maxValue > 0 && logScroll.value < logScroll.maxValue - 8 }
     }
-    UpdateGlassDialog(title = title, onDismiss = onDismiss) {
+    GlassPanelDialog(title = title, onDismiss = onDismiss) {
         Text(
             versionLine +
                 if (sizeBytes > 0) " · 安装包 ${formatBytes(sizeBytes)}" else "",
@@ -206,11 +205,13 @@ fun UpdateAvailableDialog(
         Spacer(Modifier.height(18.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onDismiss) { Text(dismissLabel) }
+            Spacer(Modifier.weight(1f))
+            GlassButton(text = dismissLabel, onClick = onDismiss)
             if (confirmLabel != null && onConfirm != null) {
-                TextButton(onClick = onConfirm, enabled = !downloading) { Text(confirmLabel) }
+                GlassButton(text = confirmLabel, onClick = onConfirm, enabled = !downloading)
             }
         }
     }
@@ -229,7 +230,7 @@ fun UpdateReadyDialog(
     onInstall: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    UpdateGlassDialog(
+    GlassPanelDialog(
         title = if (version.isBlank()) "更新已下载" else "$version 已下载完成",
         onDismiss = onDismiss,
     ) {
@@ -241,10 +242,12 @@ fun UpdateReadyDialog(
         Spacer(Modifier.height(20.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onDismiss) { Text("稍后") }
-            TextButton(onClick = onInstall) { Text("立即安装") }
+            Spacer(Modifier.weight(1f))
+            GlassButton(text = "稍后", onClick = onDismiss)
+            GlassButton(text = "立即安装", onClick = onInstall)
         }
     }
 }
@@ -257,8 +260,14 @@ fun UpdateReadyDialog(
  * 省掉真机实测 50~65ms 的开窗首帧），否则退回独立 Dialog 窗口；面板统一用
  * [appDialogSurface] 首页渐变玻璃，标题与正文由调用方填。
  */
+/**
+ * 通用玻璃弹窗外壳：遮罩 + 居中渐变压克力面板 + 淡入微缩放。
+ *
+ * 全站弹窗共用同一套版式，内容与底部按钮由调用方填 —— 这样标题、圆角、遮罩、
+ * 内边距不会这一处 24dp、那一处 16dp 地各写一遍。
+ */
 @Composable
-private fun UpdateGlassDialog(
+fun GlassPanelDialog(
     title: String,
     onDismiss: () -> Unit,
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,

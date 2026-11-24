@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -43,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,6 +67,27 @@ import com.yaoahos.mypureplayer.data.VideoItem
 import kotlinx.coroutines.flow.first
 import com.yaoahos.mypureplayer.media.Thumbnails
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.os.Handler
+import android.os.Looper
+
+/**
+ * 会立刻跳页/播放的卡片专用点击包装。
+ *
+ * 直接把 onClick 交给 combinedClickable 时，抬起与页面跳转落在同一帧，
+ * 卡片当场被销毁，按压层一次都没画出来（真机 30fps 录屏确认）。
+ * 这里用主线程 Handler 延后一小段再执行动作，让 [GlassPress.TAP_MS] 的淡片
+ * 至少亮一次；Handler 不随 Compose 组合销毁，所以跳页后动作仍会照常执行。
+ */
+@Composable
+fun rememberFlashClick(onClick: () -> Unit): () -> Unit {
+    val current by rememberUpdatedState(onClick)
+    val handler = remember { Handler(Looper.getMainLooper()) }
+    return remember(handler) {
+        {
+            handler.postDelayed({ current() }, GlassPress.ACTION_DELAY_MS)
+        }
+    }
+}
 
 /**
  * 视频缩略图：内存/磁盘缓存命中时秒开，未命中时先铺一层柔和渐变占位再替换，
@@ -171,9 +192,10 @@ object PageMetrics {
     val PanelRadius = 26.dp
 
     // 浮层宽度上限：手机上不生效（屏幕本就没这么宽），平板/横屏防止弹窗与底栏被拉满整屏。
-    // Dialog 类面板较窄，底部面板/操作栏略宽，都保持居中。
+    // 底部面板、排列排序弹窗、四格底栏玻璃条与 Dialog 统一到同一档宽度并居中，
+    // 否则横屏下一个内容很少的排序弹窗也会横贯整屏，显得又宽又空。
     val DialogMaxWidth = 520.dp
-    val SheetMaxWidth = 640.dp
+    val SheetMaxWidth = 520.dp
 }
 
 /**
@@ -270,11 +292,13 @@ fun Modifier.selectionCardOutline(
     val shape = RoundedCornerShape(PageMetrics.CardRadius)
     // 用用户当前主题色（与玻璃卡薄纱同源），而不是系统 primary，避免换主题后描边与底色串色。
     val accent = com.yaoahos.mypureplayer.ui.components.appGlass().accent
+    // 按压走全站统一的 [glassPressOverlay]：早先按下是把整张卡切成 tinted
+    // （主题色 12%），与卡片自己的淡蓝底只差 2~3/255，按下去几乎没有反馈。
     val base = appGlassSurface(
         shape = shape,
-        tinted = selected || pressed,
-        elevation = if (selected || pressed) 1.dp else 3.dp,
-    )
+        tinted = selected,
+        elevation = if (selected) 1.dp else 3.dp,
+    ).glassPressOverlay(pressed, shape, foreground = true)
     val outlined = base.border(
         width = if (selected) 2.dp else 1.dp,
         color = if (selected) accent else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
@@ -292,12 +316,12 @@ fun Modifier.selectionCardOutline(
  * 那套画法没有片体渐变和斜向高光，与设置页的玻璃卡放在一屏里就是两种材质：
  * 一个像玻璃片，一个像磨砂色块。
  *
- * 按下时改用 [tinted]（更浓的一层主题色玻璃）作为反馈，仍然保留玻璃的层次。
+ * 按下时叠一层全站统一的按压淡片（[glassPressOverlay]），强度与节奏和设置页的行完全一致。
+ * 早先按下是把整卡切成 [appGlassSurface] 的 `tinted`（主题色 12%）：卡片本身已经带
+ * 同色相的底，两者只差 2~3/255，用户反馈"文件夹、视频点了没反应"。
  *
- * [selected] 用于「正在播放的那一行」。之前只把底色换成 tinted（主题色 12%），
- * 而玻璃卡片本身就带同色相的底，两者差得太小 —— 用户原话"选中颜色与背景色太接近"。
- * 现在再加两条**形状**信号：整片 10% 强调色薄纱 + 左边一根 3.5dp 圆头竖条。
- * 形状比颜色更容易在余光里被认出来，也不必把底色压得很重。
+ * [selected] 用于「正在播放的那一行」。再加两条**形状**信号：整片 10% 强调色薄纱 +
+ * 左边一根 3.5dp 圆头竖条。形状比颜色更容易在余光里被认出来，也不必把底色压得很重。
  */
 @Composable
 fun Modifier.mediaCardOutline(
@@ -305,11 +329,12 @@ fun Modifier.mediaCardOutline(
     selected: Boolean = false,
 ): Modifier {
     val accent = com.yaoahos.mypureplayer.ui.components.appGlass().accent
+    val shape = RoundedCornerShape(PageMetrics.CardRadius)
     val base = appGlassSurface(
-        shape = RoundedCornerShape(PageMetrics.CardRadius),
-        tinted = pressed || selected,
-        elevation = if (pressed || selected) 1.dp else 3.dp,
-    )
+        shape = shape,
+        tinted = selected,
+        elevation = if (selected) 1.dp else 3.dp,
+    ).glassPressOverlay(pressed, shape, foreground = true)
     if (!selected) return base
     return base.drawBehind {
         drawRect(accent.copy(alpha = 0.10f))
@@ -454,7 +479,8 @@ fun VideoGridCard(
     metaMaxLines: Int = 1,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
+    val flashClick = rememberFlashClick(onClick)
     // 卡片宽度随屏幕变化很大（手机窄列 / 平板宽列），字号跟着分档，避免窄卡片标题更挤、宽卡片字太小
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compact = maxWidth < 100.dp
@@ -466,7 +492,7 @@ fun VideoGridCard(
                 .combinedClickable(
                     interactionSource = interaction,
                     indication = null,
-                    onClick = onClick,
+                    onClick = flashClick,
                     onClickLabel = if (selecting) "选中/取消选择" else "播放",
                     onLongClick = onLongClick,
                     onLongClickLabel = if (onLongClick != null) "更多操作" else null,
@@ -549,7 +575,8 @@ fun VideoListRow(
     metaMaxLines: Int = 1,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
+    val flashClick = rememberFlashClick(onClick)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -557,7 +584,7 @@ fun VideoListRow(
             .combinedClickable(
                 interactionSource = interaction,
                 indication = null,
-                onClick = onClick,
+                onClick = flashClick,
                 onClickLabel = if (selecting) "选中/取消选择" else "播放",
                 onLongClick = onLongClick,
                 onLongClickLabel = if (onLongClick != null) "更多操作" else null,
@@ -672,7 +699,8 @@ fun MediaFolderGridCard(
     subtitleMaxLines: Int = 1,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
+    val flashClick = rememberFlashClick(onClick)
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compact = maxWidth < 100.dp
         // 图标放大到图形区的六成多，视觉上和铺满的缩略图同一个体量，
@@ -685,7 +713,7 @@ fun MediaFolderGridCard(
                 .combinedClickable(
                     interactionSource = interaction,
                     indication = null,
-                    onClick = onClick,
+                    onClick = flashClick,
                     onClickLabel = if (selecting) "选中/取消选择" else "打开",
                     onLongClick = onLongClick,
                     onLongClickLabel = if (onLongClick != null) "更多操作" else null,
@@ -752,7 +780,8 @@ fun MediaFolderRow(
     showSubtitle: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
+    val flashClick = rememberFlashClick(onClick)
     Row(
         Modifier
             .fillMaxWidth()
@@ -760,7 +789,7 @@ fun MediaFolderRow(
             .combinedClickable(
                 interactionSource = interaction,
                 indication = null,
-                onClick = onClick,
+                onClick = flashClick,
                 onClickLabel = if (selecting) "选中/取消选择" else "打开",
                 onLongClick = onLongClick,
                 onLongClickLabel = if (onLongClick != null) "更多操作" else null,

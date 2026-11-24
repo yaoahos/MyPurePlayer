@@ -5,7 +5,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,6 +55,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import com.yaoahos.mypureplayer.core.Formats
@@ -133,6 +136,12 @@ fun HistoryScreen(navController: NavHostController) {
         // 兜底：文件可能是在系统相册 / 文件管理器里被删掉的，那条路径不经过本应用的删除流程，
         // 历史里就会留下一点就报错的死记录。开页时清一次，比让用户自己发现更好。
         Graph.history.pruneMissing()
+    }
+
+    // 页面停留期间也可能被别的应用删文件：每次切回本页都按 File.exists 对账一次。
+    // 只清真不存在的，不会动刚刚播放到一半的记录。
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        scope.launch { Graph.history.pruneMissing() }
     }
 
     Scaffold(
@@ -254,7 +263,7 @@ fun HistoryScreen(navController: NavHostController) {
                                 if (selection.active) {
                                     selection.toggle(entry.id.toString())
                                 } else {
-                                    resume(navController, scope, entry, settings.resumePlayback)
+                                    flashClick { resume(navController, scope, entry, settings.resumePlayback) }
                                 }
                             },
                             onLongClick = {
@@ -337,7 +346,7 @@ private fun HistoryRow(
 ) {
     val stub = remember(entry.id) { entry.toStub() }
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    val pressed by interaction.collectPressedWithTap()
     // 与回收站 / 保险箱 / 串流同一套：玻璃行卡 + 20dp 圆角 + 104×60 缩略图。
     // 早先这里是「裸行」——没有卡片底，只有一条缩略图，切到隔壁页就像换了个 App。
     Row(

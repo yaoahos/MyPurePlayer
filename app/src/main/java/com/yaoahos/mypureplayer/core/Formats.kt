@@ -27,15 +27,14 @@ object Formats {
     )
 
     /**
-     * 字幕扩展名白名单（用于发现同目录字幕文件）。
+     * 字幕扩展名白名单（用于发现同目录字幕文件、SMB 目录里的字幕）。
      *
-     * 实际能渲染的只有 SRT / ASS / SSA / VTT；sub / smi / idx / ttml / sbv / lrc / sup / pgs
-     * 目前会被当成 ASS 文本尝试解析，多数显示不出内容，属于待支持项。
+     * 只列播放内核真正能渲染的四种：SRT / ASS / SSA / VTT。
+     * 此前把 sub / smi / idx / ttml / sbv / sup / pgs 也列进来，点击后会以 TEXT_SSA
+     * 交给解析器，多数解析不出内容——用户看到的是「选了字幕但屏幕上一片空白」，
+     * 却不知道是格式不支持。宁可不出现在列表里，也不要给一个注定失败的入口。
      */
-    val SUBTITLE_EXTS: Set<String> = hashSetOf(
-        "srt", "ass", "ssa", "vtt", "sub", "smi", "sami", "idx", "mpl",
-        "ttml", "dfxp", "sbv", "lrc", "psb", "srt2", "sup", "pgs",
-    )
+    val SUBTITLE_EXTS: Set<String> = hashSetOf("srt", "ass", "ssa", "vtt")
 
     fun extensionOf(name: String): String {
         val idx = name.lastIndexOf('.')

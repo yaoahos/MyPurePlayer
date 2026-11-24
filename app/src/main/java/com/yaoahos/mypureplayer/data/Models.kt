@@ -128,6 +128,8 @@ data class PlayerUiState(
     val error: String? = null,
     val queueIndex: Int = -1,
     val queueSize: Int = 0,
+    /** 当前队列实际使用的播放顺序；播放页可临时改，不影响设置页的全局值 */
+    val playMode: Int = com.yaoahos.mypureplayer.data.PlayModes.SEQUENCE,
     val scaleMode: Int = 0,
     val subtitlesEnabled: Boolean = true,
     val activeSubtitleId: Int = -1,

@@ -8,6 +8,7 @@ import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import com.yaoahos.mypureplayer.data.SmbClient
 import com.yaoahos.mypureplayer.data.SmbRandomReader
 import com.yaoahos.mypureplayer.data.SmbServer
@@ -19,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
  * （账号/口令/域），但 MediaItem 里只带播放 URL，所以在这里按 URL 关联一次。
  */
 object SmbPlaybackRegistry {
-    private data class Entry(val server: SmbServer, var lastAccess: Long)
+    private data class Entry(val server: SmbServer, @Volatile var lastAccess: Long)
     private val map = ConcurrentHashMap<String, Entry>()
 
     /** 上限：超过后按 lastAccess 淘汰最旧的，防止会话期内无限增长（Entry 持有含口令的对象） */
@@ -34,11 +35,10 @@ object SmbPlaybackRegistry {
             val stripped = Uri.Builder().scheme(u.scheme).authority(u.host).path(u.path).build().toString()
             if (stripped != url) map.putIfAbsent(stripped, Entry(server, now))
         }
-        // 再登记一份解码后的原生路径（无 userinfo）：DataSource 实际是用它去开的
-        runCatching {
-            val native = SmbClient.nativeUrl(url)
-            if (native != url) map.putIfAbsent(native, Entry(server, now))
-        }
+        // 只登记「去掉 userinfo、路径仍百分号编码」的那种形式。
+        // 过去还额外把 nativeUrl（已解码）登记进去，VLC/Media3 将 smb:// 路径里的
+        // %E4%B8%AD 再解一次时，#/? 这类合法文件名会被当成 fragment/query 截断，
+        // 命中这条错误 key 后字幕与视频会打开失败；DataSource 自己会做 nativeUrl 转换。
         if (map.size > MAX_ENTRIES) {
             map.entries.sortedBy { it.value.lastAccess }
                 .take(map.size - MAX_ENTRIES)
@@ -67,9 +67,12 @@ object SmbPlaybackRegistry {
 object SmbHandlePool {
     // smbj 的同一连接支持并发请求，句柄本身也自带锁，不再需要过去那把全局串行锁：
     // 不同文件的读可以真正同时进行（同一文件的两个 DataSource 也各自走 readAt 原子定位）。
-    class Entry(val raf: SmbRandomReader, var size: Long = -1L, var lastAccess: Long) {
+    class Entry(val raf: SmbRandomReader, var size: Long = -1L, @Volatile var lastAccess: Long) {
         /** 正在使用该句柄的 DataSource 数：>0 时空闲回收不能关它（否则播放会被静默截断） */
         var refs: Int = 0
+
+        /** 已被判定失效并逐出池子：最后一个使用者归还时真正关闭，不能边读边关 */
+        var invalidated: Boolean = false
 
         /** 读取期间持续刷新访问时间，长时间顺序播放不会被别的 acquire 误回收 */
         fun touch() {
@@ -103,10 +106,14 @@ object SmbHandlePool {
         }
     }
 
-    /** DataSource 关闭时归还引用：降到 0 后句柄才参与空闲回收 */
-    fun release(entry: Entry) = synchronized(lock) {
-        if (entry.refs > 0) entry.refs--
-        entry.touch()
+    /** DataSource 关闭时归还引用：降到 0 后句柄才参与空闲回收；已失效的此刻才真正关闭 */
+    fun release(entry: Entry) {
+        val closeNow = synchronized(lock) {
+            if (entry.refs > 0) entry.refs--
+            entry.touch()
+            entry.invalidated && entry.refs == 0
+        }
+        if (closeNow) runCatching { entry.raf.close() }
     }
 
     /** 缓存文件长度：命中后零网络往返，这是快进秒开的关键。 */
@@ -116,9 +123,23 @@ object SmbHandlePool {
         entry.size
     }
 
-    /** 驱逐并关闭坏句柄，下次 acquire 会重建连接。 */
+    /**
+     * 驱逐坏句柄，下次 acquire 会重建连接。
+     *
+     * 不能直接 close：同一个 Entry 可能被视频轨和外挂字幕两个 DataSource 同时引用，
+     * 其中一个读失败就关掉共享句柄，另一个会「播着播着静默截断」。这里先标记失效，
+     * 最后一个使用者归还时（[release]）才真正关闭。
+     */
     fun invalidate(url: String) {
-        synchronized(lock) { map.remove(url) }?.let { runCatching { it.raf.close() } }
+        var stale: Entry? = null
+        var closeNow = false
+        synchronized(lock) {
+            val e = map.remove(url) ?: return@synchronized
+            e.invalidated = true
+            stale = e
+            closeNow = e.refs == 0
+        }
+        if (closeNow) runCatching { stale?.raf?.close() }
     }
 }
 
@@ -208,7 +229,7 @@ class SmbExoDataSource : BaseDataSource(true) {
             return n
         }
 
-        // 2) 未命中：一次读满 512KB（不超过剩余长度），readAt 自带原子定位
+        // 2) 未命中：一次读满 [READ_AHEAD_BYTES]（不超过剩余长度），readAt 自带原子定位
         val chunk = minOf(READ_AHEAD_BYTES.toLong(), remaining).toInt()
         val read = readIntoCache(e, chunk, buf)
         if (read <= 0) {
@@ -234,15 +255,18 @@ class SmbExoDataSource : BaseDataSource(true) {
         val first = try {
             e.raf.readAt(absolutePos, buf, 0, size)
         } catch (t: Throwable) {
-            // SMB 连接失效：驱逐坏句柄并重建一次，避免卡在坏连接上
+            // SMB 连接失效：驱逐坏句柄、归还本 DataSource 的引用，再重建一次
             SmbHandlePool.invalidate(url)
-            val srv = server ?: return -1
+            SmbHandlePool.release(e)
+            val srv = server ?: throw IOException("SMB 会话已失效", t)
             val fresh = SmbHandlePool.acquire(url, srv)
             entry = fresh
             try {
                 fresh.raf.readAt(absolutePos, buf, 0, size)
             } catch (t2: Throwable) {
-                return -1
+                // 不能把读失败伪装成 EOF：Media3 会当成「播完了」，既不重试也不提示。
+                // 抛 IOException 交给播放器按正常的网络错误处理（可重试、可提示）。
+                throw IOException("SMB 读取失败：${t2.message ?: t2.javaClass.simpleName}", t2)
             }
         }
         return first
@@ -275,12 +299,23 @@ class SmbExoDataSource : BaseDataSource(true) {
 class SmbRoutingDataSource(private val context: Context) : BaseDataSource(false) {
     private var delegate: DataSource? = null
 
+    /**
+     * 网络片源用独立的 HTTP 源：Media3 默认关闭跨协议重定向，很多短链/网盘直链
+     * 会先 302 到 https，结果表现为「能打开网页但播放器一直转圈」。
+     * 同时把连接/读取超时从默认值收紧，断线时更快进入错误恢复而不是干等。
+     */
+    private val httpFactory = DefaultHttpDataSource.Factory()
+        .setAllowCrossProtocolRedirects(true)
+        .setConnectTimeoutMs(15_000)
+        .setReadTimeoutMs(20_000)
+        .setUserAgent("MyPurePlayer/1.0.1")
+
     override fun open(dataSpec: DataSpec): Long {
-        val scheme = dataSpec.uri.scheme
-        val d: DataSource = if (scheme?.equals("smb", ignoreCase = true) == true) {
-            SmbExoDataSource()
-        } else {
-            DefaultDataSource(context, false)
+        val scheme = dataSpec.uri.scheme?.lowercase()
+        val d: DataSource = when (scheme) {
+            "smb" -> SmbExoDataSource()
+            "http", "https" -> httpFactory.createDataSource()
+            else -> DefaultDataSource(context, false)
         }
         delegate = d
         return d.open(dataSpec)

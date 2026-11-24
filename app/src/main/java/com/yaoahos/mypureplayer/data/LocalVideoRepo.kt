@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 
 /** 本地文件夹分组 */
@@ -107,6 +108,11 @@ class LocalVideoRepo(private val context: Context) {
 
                 val id = c.getLong(idIdx)
                 val data = if (dataIdx >= 0) c.getString(dataIdx) else null
+                // MediaStore 里的行不一定跟着物理文件一起消失：在文件管理器里删掉视频后，
+                // 旧行可能还留着。只查库不校验文件，列表里就会出现"点进去文件不存在"的死条目，
+                // 而且手动刷新只会再查一次同样的库，怎么刷都刷不掉。
+                // DATA 不可得时不猜（部分机型返回空），沿用 contentUri 播放。
+                if (!data.isNullOrBlank() && !File(data).exists()) continue
                 val contentUri = ContentUris.withAppendedId(collection, id)
                 val bucketId = if (bucketIdIdx >= 0 && !c.isNull(bucketIdIdx)) c.getString(bucketIdIdx) else null
                 val bucketName = if (bucketNameIdx >= 0) c.getString(bucketNameIdx) else null
@@ -137,6 +143,23 @@ class LocalVideoRepo(private val context: Context) {
         }
 
         return result
+    }
+
+    /**
+     * 立刻从本地列表摘掉已经不在原位的条目，不依赖 MediaStore 的异步扫描回调。
+     *
+     * 删除走的是 `MediaScannerConnection.scanFile(...)` 无回调版本，媒体库更新有延迟。
+     * 如果只等刷新去重新 query，删除后短时间内那条死记录还在；用户在文件管理器里删的
+     * 文件更是根本不经过本应用。这里按 id 或原路径对账，立刻把列表收紧。
+     */
+    fun dropGone(items: Collection<VideoItem>) {
+        if (items.isEmpty()) return
+        val ids = items.map { it.id }.toSet()
+        val paths = items.mapNotNull { it.localPath }.toSet()
+        val next = _videos.value.filterNot { item ->
+            item.id in ids || (item.localPath != null && item.localPath in paths)
+        }
+        if (next.size != _videos.value.size) _videos.value = next
     }
 
     fun videosInFolder(folderKey: String): List<VideoItem> =

@@ -6,6 +6,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
+import com.yaoahos.mypureplayer.ui.components.flashClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +67,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import com.yaoahos.mypureplayer.core.Formats
@@ -80,6 +85,7 @@ import com.yaoahos.mypureplayer.ui.components.GlassEdge
 import com.yaoahos.mypureplayer.ui.components.GlassChoiceDialog
 import com.yaoahos.mypureplayer.ui.components.GlassChoiceRow
 import com.yaoahos.mypureplayer.ui.components.ListSelection
+import java.io.File
 import com.yaoahos.mypureplayer.ui.components.MediaInfoDialog
 import com.yaoahos.mypureplayer.ui.components.Notice
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
@@ -95,7 +101,9 @@ import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.appGlassBar
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
 import com.yaoahos.mypureplayer.ui.components.label
+import com.yaoahos.mypureplayer.ui.components.glassPressOverlay
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
+import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
 import com.yaoahos.mypureplayer.ui.components.rememberMediaDuration
 import com.yaoahos.mypureplayer.ui.components.selectionCardOutline
@@ -128,6 +136,20 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
     val title = if (isNowPlaying) "正在播放" else pl?.name ?: "播放列表"
     val allMembers: List<VideoItem> = if (isNowPlaying) queue else pl?.videos.orEmpty()
     val gone = !isNowPlaying && pl == null
+
+    // 自建播放列表里的本地条目也可能是被系统相册/文件管理器删掉的死记录。
+    // 每次切回页面按真实文件对账一次，避免点进去才看到"文件不存在"。
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        scope.launch {
+            Graph.playlists.load()
+            Graph.local.scan(silent = true)
+            val current = Graph.playlists.playlists.value.firstOrNull { it.id == playlistId }
+            val stale = current?.videos?.filter { item ->
+                item.localPath?.let { path -> path.isNotBlank() && !File(path).exists() } == true
+            }.orEmpty()
+            if (stale.isNotEmpty()) Graph.playlists.dropGone(stale)
+        }
+    }
 
     // 「最近播放」项：当前正在播放的最优先；否则在自建列表里取历史中最近播放且属于本列表的一条。
     // 用来给那一行显示选中态（蓝竖条 + 蓝序号 + 淡蓝底），让用户一眼看出上次看到哪。
@@ -296,6 +318,9 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                             Playback.play(allMembers, start)
                             navController.navigate(Routes.PLAYER)
                         }
+                        // 点卡片先闪一次再播放/跳页：立即跳页会让卡片当场销毁，
+                        // 按压淡片一帧都没画出来（用户看到的就是"点了没反应"）。
+                        fun flashPlayAt(item: VideoItem) = flashClick { playAt(item) }
                         // 「正在播放」详情页顶部 = 正在播放的内容（旧的播放列表就是这样）：
                         // 当前视频缩略图 + 播放状态 + 实时进度，点一下回到播放器。
                         // 冷启动后播放器状态还没恢复，用队列第一项兜底，保证顶部始终有内容。
@@ -313,7 +338,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                         rememberMediaDuration(heroItem)
                                     },
                                     count = allMembers.size,
-                                    onClick = { navController.navigate(Routes.PLAYER) },
+                                    onClick = { flashClick { navController.navigate(Routes.PLAYER) } },
                                 )
                             }
                         }
@@ -333,9 +358,11 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                         color = appGlass().borderTop,
                                         shape = RoundedCornerShape(PageMetrics.CardRadius),
                                     )
-                                    .clickable(role = Role.Button) {
-                                        Playback.play(members, 0)
-                                        navController.navigate(Routes.PLAYER)
+                                    .glassPressable(role = Role.Button, radius = PageMetrics.CardRadius) {
+                                        flashClick {
+                                            Playback.play(members, 0)
+                                            navController.navigate(Routes.PLAYER)
+                                        }
                                     }
                                     .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -418,26 +445,35 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                     val progressRatio = if (total > 0L && resumeMs > 0L) {
                                         (resumeMs.toFloat() / total).coerceIn(0f, 1f)
                                     } else 0f
+                                    val interaction = remember { MutableInteractionSource() }
+                                    val pressed by interaction.collectPressedWithTap()
+                                    val shape = RoundedCornerShape(PageMetrics.CardRadius)
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .then(
                                                 if (selection.active) {
-                                                    Modifier.selectionCardOutline(selected = isSelected, selecting = true)
-                                                } else if (isRecentItem) {
-                                                    Modifier.appGlassSurface(
-                                                        RoundedCornerShape(PageMetrics.CardRadius),
-                                                        tinted = true,
+                                                    Modifier.selectionCardOutline(
+                                                        selected = isSelected,
+                                                        selecting = true,
+                                                        pressed = pressed,
                                                     )
-                                                } else Modifier.mediaCardOutline(selected = false)
+                                                } else if (isRecentItem) {
+                                                    // 「最近播放」整卡染一层淡色，按压再叠一层统一淡片
+                                                    Modifier
+                                                        .appGlassSurface(shape, tinted = true)
+                                                        .glassPressOverlay(pressed, shape, foreground = true)
+                                                } else Modifier.mediaCardOutline(pressed = pressed)
                                             )
                                             .combinedClickable(
+                                                interactionSource = interaction,
+                                                indication = null,
                                                 role = Role.Button,
                                                 onClickLabel = if (selection.active) "选中/取消选择" else "播放",
                                                 onLongClickLabel = "选择",
                                                 onLongClick = { selection.enter(item.id) },
                                             ) {
-                                                if (selection.active) selection.toggle(item.id) else playAt(item)
+                                                if (selection.active) selection.toggle(item.id) else flashPlayAt(item)
                                             }
                                             .padding(horizontal = 10.dp, vertical = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -751,7 +787,7 @@ private fun NowPlayingHero(
                 modifier = Modifier
                     .clip(RoundedCornerShape(24.dp))
                     .background(accent.copy(alpha = 0.16f))
-                    .clickable(role = Role.Button, onClick = onClick)
+                    .glassPressable(role = Role.Button, radius = 24.dp, onClick = onClick)
                     .padding(horizontal = 12.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {

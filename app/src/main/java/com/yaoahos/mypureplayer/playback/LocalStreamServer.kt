@@ -52,10 +52,16 @@ object LocalStreamServer {
         val uri: Uri,
         val mime: String,
         val sizeHint: Long,
+        /** 这个 token 是给 127.0.0.1 还是给局域网设备用的，两者不共用 token */
+        val host: String = "127.0.0.1",
         /** 非空的 SMB 条目由 SmbRandomAccessFile 供数，用于 DLNA 电视经 HTTP 拉流 */
         val smbServer: SmbServer? = null,
         val smbUrl: String? = null,
     ) {
+        /** 局域网 token 首次访问后绑定客户端 IP；本机 token 只允许回环访问 */
+        @Volatile
+        var boundClient: String? = null
+
         /**
          * 最近一次被访问的时间（单调时钟），用于 token 滑动过期。
          *
@@ -80,42 +86,101 @@ object LocalStreamServer {
         @Volatile
         var smbSize: Long = -1L
 
-        fun closeSmbHandle() {
+        /** 正在使用 [smbHandle] 的并发 Range 请求数；>0 时谁都不能关这个共享句柄 */
+        var smbUsers: Int = 0
+
+        fun acquireSmbHandle(server: SmbServer, url: String): SmbRandomReader? = synchronized(smbLock) {
+            smbUsers++
+            smbHandle ?: runCatching { SmbClient.randomAccess(server, url) }
+                .getOrNull()?.also { smbHandle = it }
+        }
+
+        fun releaseSmbHandle(close: Boolean = false) {
             synchronized(smbLock) {
-                runCatching { smbHandle?.close() }
-                smbHandle = null
-                smbSize = -1L
+                if (smbUsers > 0) smbUsers--
+                if (close && smbUsers == 0) closeLocked()
             }
+        }
+
+        /** 有并发使用者时不关，交给最后一个 releaseSmbHandle(close = true) 收尾 */
+        fun closeSmbHandle(): Boolean = synchronized(smbLock) {
+            if (smbUsers > 0) false else {
+                closeLocked()
+                true
+            }
+        }
+
+        private fun closeLocked() {
+            runCatching { smbHandle?.close() }
+            smbHandle = null
+            smbSize = -1L
         }
     }
 
-    /** token 空闲多久后失效：6 小时没有任何请求即认为这个 URL 已经没人用了 */
-    private const val TOKEN_TTL_MS = 6 * 60 * 60 * 1000L
+    /**
+     * token 空闲多久后失效：30 分钟没有任何请求即回收。
+     * 播放中每隔几秒就有 Range 请求，正常观看不会被踢；暂停很久后再点播放，
+     * 播放器会重新拉流，此时 token 已失效则由上层重新生成投屏地址，不会卡死。
+     */
+    private const val TOKEN_TTL_MS = 30 * 60 * 1000L
 
     /** 清掉过期条目，顺便避免 registry 随播放过的每个文件无限增长 */
     private fun pruneExpired() {
         val now = SystemClock.elapsedRealtime()
-        registry.entries.removeAll { (now - it.value.lastAccess > TOKEN_TTL_MS).also { expired ->
-            if (expired) it.value.closeSmbHandle()
-        } }
+        registry.entries.removeAll { entry ->
+            now - entry.value.lastAccess > TOKEN_TTL_MS && entry.value.closeSmbHandle()
+        }
     }
 
     @Volatile
     private var port: Int = 0
     private var serverSocket: ServerSocket? = null
+    /** 当前是否监听所有网卡。默认只听回环，只有真正发起投屏时才临时放开。 */
+    @Volatile
+    private var lanBound = false
 
     @Synchronized
-    private fun ensureStarted(context: Context): Int {
-        if (port > 0) return port
-        // 监听所有网卡：本机播放器仍走 127.0.0.1，投屏时局域网设备用同一个端口访问。
-        // token 是随机 UUID，外部设备猜不到，不会暴露整个存储目录。
-        val socket = ServerSocket(0, 16, InetAddress.getByName("0.0.0.0"))
+    private fun ensureStarted(context: Context, lan: Boolean = false): Int {
+        val app = context.applicationContext
+        appContext = app
+        if (port > 0) {
+            // 0.0.0.0 同时覆盖 127.0.0.1，已经放开时无需为本地播放再切回去
+            if (!lan || lanBound) return port
+            rebind(lan = true)
+            return port
+        }
+        val socket = ServerSocket(0, 16, InetAddress.getByName(if (lan) "0.0.0.0" else "127.0.0.1"))
         serverSocket = socket
         port = socket.localPort
-        Log.i(TAG, "stream server on 0.0.0.0:$port")
-        scope.launch { acceptLoop(context.applicationContext, socket) }
+        lanBound = lan
+        Log.i(TAG, "stream server on ${if (lan) "0.0.0.0" else "127.0.0.1"}:$port")
+        scope.launch { acceptLoop(app, socket) }
         return port
     }
+
+    /** 投屏结束后收回局域网监听：本机播放仍然正常，但同网段设备不再能连这个端口。 */
+    @Synchronized
+    fun stopLan() {
+        if (!lanBound || port <= 0) return
+        rebind(lan = false)
+    }
+
+    /** 关闭旧 socket 并在同一端口按新的可见范围重开；已建立的 TCP 连接不受影响。 */
+    private fun rebind(lan: Boolean) {
+        val app = appContext ?: return
+        val old = serverSocket
+        serverSocket = null
+        runCatching { old?.close() }
+        val addr = InetAddress.getByName(if (lan) "0.0.0.0" else "127.0.0.1")
+        val socket = ServerSocket(port, 16, addr)
+        serverSocket = socket
+        lanBound = lan
+        Log.i(TAG, "stream server rebound to ${if (lan) "0.0.0.0" else "127.0.0.1"}:$port")
+        scope.launch { acceptLoop(app, socket) }
+    }
+
+    @Volatile
+    private var appContext: Context? = null
 
     /** 把本地视频登记成一个 http 地址（本机播放器用回环地址） */
     fun urlFor(context: Context, item: com.yaoahos.mypureplayer.data.VideoItem): String =
@@ -146,16 +211,19 @@ object LocalStreamServer {
         server: SmbServer,
         host: String,
     ): String {
-        val port = ensureStarted(context)
+        // 电视要访问，监听范围才临时扩到局域网；仅本机播放时服务只在回环上。
+        val port = ensureStarted(context, lan = true)
         pruneExpired()
         val existing = registry.entries.firstOrNull {
-            it.value.smbUrl == item.uri && it.value.smbServer?.id == server.id
+            it.value.host == host && it.value.smbUrl == item.uri &&
+                it.value.smbServer?.id == server.id
         }?.key
         val token = existing ?: UUID.randomUUID().toString().replace("-", "").also {
             registry[it] = Entry(
                 uri = Uri.EMPTY,
                 mime = mimeOf(item.fileName),
                 sizeHint = item.sizeBytes,
+                host = host,
                 smbServer = server,
                 smbUrl = item.uri,
             )
@@ -169,11 +237,19 @@ object LocalStreamServer {
         item: com.yaoahos.mypureplayer.data.VideoItem,
         host: String,
     ): String {
-        val p = ensureStarted(context)
+        val lan = host != "127.0.0.1"
+        val p = ensureStarted(context, lan = lan)
         pruneExpired()
-        val existing = registry.entries.firstOrNull { it.value.uri.toString() == item.uri }?.key
+        val existing = registry.entries.firstOrNull {
+            it.value.host == host && it.value.uri.toString() == item.uri
+        }?.key
         val token = existing ?: UUID.randomUUID().toString().replace("-", "").also {
-            registry[it] = Entry(Uri.parse(item.uri), mimeOf(item.fileName), item.sizeBytes)
+            registry[it] = Entry(
+                Uri.parse(item.uri),
+                mimeOf(item.fileName),
+                item.sizeBytes,
+                host = host,
+            )
         }
         val ext = Formats.extensionOf(item.fileName).ifBlank { "mp4" }
         return "http://$host:$p/v/$token.$ext"
@@ -239,6 +315,25 @@ object LocalStreamServer {
             if (entry == null) {
                 writeSimple(s, 404, "Not Found", "")
                 return
+            }
+            // token 与访问来源绑定：本机地址只接受回环，局域网地址首次访问后锁定那台设备。
+            // 之前同网段任意设备拿到一次 URL 就能在 6 小时内持续读取对应文件。
+            val clientIp = s.inetAddress.hostAddress.orEmpty().substringBefore('%')
+            if (entry.host == "127.0.0.1") {
+                if (!s.inetAddress.isLoopbackAddress) {
+                    Log.w(TAG, "拒绝局域网访问本机专用 token")
+                    writeSimple(s, 403, "Forbidden", "")
+                    return
+                }
+            } else {
+                val bound = entry.boundClient
+                if (bound == null) {
+                    entry.boundClient = clientIp
+                } else if (bound != clientIp) {
+                    Log.w(TAG, "拒绝其它设备复用投屏 token")
+                    writeSimple(s, 403, "Forbidden", "")
+                    return
+                }
             }
             // 滑动过期：播放过程中每个 Range 请求都会刷新时间，只有彻底没人用的地址才失效
             if (SystemClock.elapsedRealtime() - entry.lastAccess > TOKEN_TTL_MS) {
@@ -333,13 +428,15 @@ object LocalStreamServer {
             val toStr = spec.substringAfter('-').trim()
             partial = true
             if (fromStr.isNotEmpty()) {
-                start = (fromStr.toLongOrNull() ?: 0L).coerceAtLeast(0L)
+                // 非法 Range 不能静默吞成 0~结尾：播放器会以为拿到了正确数据，
+                // 实际却从头开始解析，表现为画面错位/一直缓冲。这里明确回 416。
+                start = fromStr.toLongOrNull()?.coerceAtLeast(0L) ?: return null
                 if (toStr.isNotEmpty()) {
-                    end = toStr.toLongOrNull() ?: (total - 1)
+                    end = toStr.toLongOrNull() ?: return null
                 }
             } else if (toStr.isNotEmpty()) {
                 // bytes=-N 表示末尾 N 字节
-                val suffix = (toStr.toLongOrNull() ?: 0L).coerceAtLeast(0L)
+                val suffix = toStr.toLongOrNull()?.coerceAtLeast(0L) ?: return null
                 start = (total - suffix).coerceAtLeast(0L)
             }
         }
@@ -367,14 +464,13 @@ object LocalStreamServer {
     ) {
         // 复用同一个 SMB 句柄：首次打开时创建一次，之后每个 Range 只做 seek+read，
         // 不再重复 Open/QueryInfo/Close 三次 SMB 往返（快进卡顿的主因）。
-        val raf: SmbRandomReader? = synchronized(entry.smbLock) {
-            entry.smbHandle ?: runCatching { SmbClient.randomAccess(server, url) }
-                .getOrNull()?.also { entry.smbHandle = it }
-        }
+        val raf: SmbRandomReader? = entry.acquireSmbHandle(server, url)
         if (raf == null) {
+            entry.releaseSmbHandle()
             writeSimple(socket, 404, "Not Found", "")
             return
         }
+        var closeHandleOnRelease = false
         // 文件大小缓存：优先用登记时的 sizeHint，省掉每次 raf.length() 的 QUERY_INFO 往返。
         val total = synchronized(entry.smbLock) {
             if (entry.smbSize <= 0L) {
@@ -383,11 +479,13 @@ object LocalStreamServer {
             entry.smbSize
         }.let { if (it > 0L) it else entry.sizeHint }
         if (total <= 0L) {
+            entry.releaseSmbHandle()
             writeSimple(socket, 500, "Internal Server Error", "")
             return
         }
         val r = resolveRange(rangeHeader, total)
         if (r == null) {
+            entry.releaseSmbHandle()
             writeSimple(socket, 416, "Range Not Satisfiable", "Content-Range: bytes */$total\r\n")
             return
         }
@@ -409,6 +507,7 @@ object LocalStreamServer {
                 socket.getOutputStream().write(header.toByteArray())
                 socket.getOutputStream().flush()
             }
+            entry.releaseSmbHandle()
             return
         }
 
@@ -430,9 +529,11 @@ object LocalStreamServer {
                     runCatching { raf.readAt(pos, buf, 0, want) }.getOrDefault(-1)
                 }
                 if (n <= 0) {
-                    // 连接可能已经失效：驱逐坏句柄，下次请求会重建
+                    // 只在所有并发 Range 请求都归还后关句柄：过去一个请求读失败就当场
+                    // close，另一个请求手里还拿着同一个 raf，下一次 readAt 直接拿到 -1，
+                    // 电视端表现为播着播着停住。
                     Log.w(TAG, "SMB 读取中断 offset=$pos")
-                    entry.closeSmbHandle()
+                    closeHandleOnRelease = true
                     break
                 }
                 out.write(buf, 0, n)
@@ -442,6 +543,8 @@ object LocalStreamServer {
         } catch (t: Throwable) {
             // 电视快进/换片会直接断开旧连接，这里属于正常收尾，不当错误上报
             Log.d(TAG, "投屏连接结束于 offset=$pos: ${t.javaClass.simpleName}")
+        } finally {
+            entry.releaseSmbHandle(close = closeHandleOnRelease)
         }
     }
 

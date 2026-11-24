@@ -152,9 +152,11 @@ private fun SheetBody(
         Column(
             modifier = modifier
                 .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                // 手机上铺满宽度，平板/横屏限宽居中，避免面板横向拉得过长。
+                // 先限宽再 fillMaxWidth：顺序反了的话 fillMaxWidth 已把 min 撑到满屏，
+                // widthIn(max) 就再也收不回来，面板在横屏/平板上仍会横贯整屏。
+                // 手机上宽度不足上限，仍是满宽；宽屏限到一档宽度并居中。
                 .widthIn(max = PageMetrics.SheetMaxWidth)
+                .fillMaxWidth()
                 .heightIn(max = (windowHeight - 24.dp).coerceAtLeast(200.dp))
                 .graphicsLayer {
                     // 位移只写在这一层：面板内容录一次绘制指令，之后每帧只更新这个值。
