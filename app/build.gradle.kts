@@ -44,6 +44,8 @@ android {
         // MIUI 不允许 versionCode 不高于已装版本的包降级/同版本覆盖（会要求先卸载），
         // 所以测试包允许临时抬高：./gradlew assembleRelease -PtestVersionCode=1001
         // 不传这个参数时仍是正式版本号，打出来的包可直接发布。
+        // 测试包另用 debug 证书签名（见 buildTypes.release）：与正式包签名不同，
+        // 无法覆盖正式包，装之前要先卸载，验证包不会被误当正式版本发出去。
         versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 4
         versionName = appVersionName
         manifestPlaceholders["appLabel"] =
@@ -90,8 +92,14 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // release 必须使用私有证书；不再使用公开 debug 签名
-            signingConfig = signingConfigs.getByName("release")
+            // 正式包必须使用私有证书；不再使用公开 debug 签名。
+            // 测试包（带 -PtestVersionCode）改用 debug 证书：签名与正式包不同，
+            // 系统会拒绝覆盖安装，必须先卸载正式版 —— 避免验证包悄悄顶掉已发布的包。
+            signingConfig = if (isTestRelease) {
+                signingConfigs.getByName("debug")
+            } else {
+                signingConfigs.getByName("release")
+            }
         }
         debug {
             applicationIdSuffix = ".debug"
