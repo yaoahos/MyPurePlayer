@@ -62,7 +62,7 @@ object UpdateChecker {
      */
     private const val OFFICIAL_CERT_SHA256 =
         "B13E014387B073F1934216F0B59A3245E0865290B104E94B19409250AAE6091D"
-    /** 官方 release 包名（debug 构建带 .debug 后缀，不作为更新目标） */
+    /** 官方 release 包名；debug 构建带 .debug、测试包带 .test 后缀，均不作为更新目标 */
     private const val OFFICIAL_PACKAGE = "com.yaoahos.mypureplayer"
 
     private val allowedHosts = setOf("github.com", "api.github.com", "codeload.github.com")
@@ -248,19 +248,20 @@ object UpdateChecker {
         // 必须和系统的安装判定同口径：PackageInstaller 用 versionCode 决定是否允许覆盖，
         // MIUI 等厂商还会直接拒绝 versionCode 回退。这里若改用 versionName 放行，
         // 只是把失败从"明确的版本提示"推迟到系统那句含糊的"应用未安装"，更糟。
-        // 测试包（-PtestVersionCode 抬高）本就不该被正式包覆盖，拦住是正确行为；
-        // 但提示要说清原因和出路，别让用户以为更新包坏了。
-        @Suppress("DEPRECATION")
-        val currentCode = runCatching {
-            pm.getPackageInfo(context.packageName, 0).versionCode
-        }.getOrDefault(0)
-        @Suppress("DEPRECATION")
-        val downloadedCode = downloaded.versionCode
-        if (downloadedCode <= 0 || downloadedCode < currentCode) {
-            throw IllegalStateException(
-                "当前安装的是内部测试版本（版本号 $currentCode），无法直接更新到正式版" +
-                    "（版本号 $downloadedCode）。请先卸载当前版本，再安装正式版。"
-            )
+        // 只在正式包上做这道检查：测试包是独立包名（.test 后缀），安装正式版是并存的
+        // 另一个应用、不存在覆盖降级，按 versionCode 拦反而会误伤。
+        if (context.packageName == OFFICIAL_PACKAGE) {
+            @Suppress("DEPRECATION")
+            val currentCode = runCatching {
+                pm.getPackageInfo(context.packageName, 0).versionCode
+            }.getOrDefault(0)
+            @Suppress("DEPRECATION")
+            val downloadedCode = downloaded.versionCode
+            if (downloadedCode <= 0 || downloadedCode < currentCode) {
+                throw IllegalStateException(
+                    "当前版本（版本号 $currentCode）不低于发布页上的版本（版本号 $downloadedCode），已取消安装。"
+                )
+            }
         }
 
         val downloadedSigs = signaturesOf(downloaded)
