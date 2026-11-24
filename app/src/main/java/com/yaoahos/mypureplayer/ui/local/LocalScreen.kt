@@ -973,9 +973,12 @@ fun startPlayback(navController: NavHostController, item: VideoItem) {
         else -> emptyList()
     }
     val list = folderVideos.ifEmpty { listOf(item) }
-    val index = list.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
-    Playback.play(list, index)
-    navController.navigate(Routes.PLAYER)
+    val index = list.indexOfFirst { it.id == item.id }
+    // 目录列表里已经没有这一条（扫描之后又被删掉）时只播它自己：
+    // 按 0 起播会默默换成同目录的第一条，用户看到的是「点 A 播了 B」。
+    Playback.playChecked(if (index >= 0) list else listOf(item), index.coerceAtLeast(0)) {
+        navController.navigate(Routes.PLAYER)
+    }
 }
 
 /**

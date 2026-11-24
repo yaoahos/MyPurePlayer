@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MyPurePlayer</string>
-    <!-- 测试/调试包在桌面名称上带后缀，避免和正式版混淆（版本号可能被 -PtestVersionCode 抬高） -->
-    <string name="app_name_test">MyPurePlayer（测试版）</string>
-    <string name="app_name_debug">MyPurePlayer（调试版）</string>
+    <!-- 调试包是独立包名（.debug）的另一个应用，桌面名称直接写明，避免和正式版混淆 -->
+    <string name="app_name_debug">MyPurePlayer 调试版</string>
 
     <string name="tab_local">本地</string>
     <string name="tab_network">网络</string>

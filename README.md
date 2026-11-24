@@ -128,6 +128,16 @@ MyPurePlayer 面向「视频存放在本机或局域网共享中」的用户。�
 
 产物：`app/build/outputs/apk/release/MyPurePlayer-<版本号>-release.apk`。
 
+**调试构建**：
+
+```
+./gradlew :app:assembleDebug
+```
+
+产物：`app/build/outputs/apk/debug/MyPurePlayer-<版本号>-debug.apk`。
+
+调试包是**另一个应用**，不是正式版的另一个版本：包名 `com.yaoahos.mypureplayer.debug`、桌面名称「MyPurePlayer 调试版」、debug 证书签名。因此两者可以同时安装、互不覆盖，验证新改动不必先卸载正式版。代价是数据目录独立——设置、网络位置、播放列表、播放历史与缩略图缓存都不共享，调试包需要重新配置一遍。
+
 **项目结构**：
 
 ```

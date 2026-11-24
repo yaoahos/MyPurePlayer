@@ -52,6 +52,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -59,6 +60,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
@@ -114,6 +116,9 @@ object Playback {
     private const val THUMB_CAPTURE_DELAY_MS = 2_500L
     /** 截到黑场（夜景/淡入）时补截一次的间隔 */
     private const val THUMB_RETRY_DELAY_MS = 6_000L
+
+    /** 起播前等服务器回音的时长；超过就当「不知道」，让播放页照常去连 */
+    private const val SMB_PROBE_WAIT_MS = 2_000L
 
     private lateinit var app: Context
     private var player: ExoPlayer? = null
@@ -608,6 +613,80 @@ object Playback {
         play(listOf(item), 0, startPositionMs)
     }
 
+    /**
+     * 用户主动点开一条视频的入口：先确认文件还在，再起播并打开播放页。
+     *
+     * 历史记录与播放列表存的是「加入那一刻的快照」。文件被删除、改名，或所在的共享
+     * 目录已从网络位置里移除之后，直接进播放页只会得到一屏「播放失败」——
+     * 用户还得先退出来才能换一条。这里就地拦下，顶部提示一句，正在播的内容不受影响。
+     *
+     * 只拦「确定不存在」：服务器没响应、网络超时这类不确定的失败照常进播放页，
+     * 那里有重试与更完整的说明，拦下来反而会让人以为视频坏了。
+     *
+     * [onStart] 默认走 [requestOpenPlayer]（界面层统一监听并跳转），需要自己控制跳转时传进来。
+     */
+    fun playChecked(
+        items: List<VideoItem>,
+        startIndex: Int,
+        startPositionMs: Long? = null,
+        onStart: () -> Unit = { requestOpenPlayer() },
+    ) {
+        if (items.isEmpty()) return
+        val index = startIndex.coerceIn(0, items.lastIndex)
+        val target = items[index]
+        scope.launch {
+            val missing = missingReason(target)
+            if (missing != null) {
+                Notice.error(missing)
+                return@launch
+            }
+            setQueue(items)
+            requestStart(index, startPositionMs ?: resumePositionOf(target))
+            onStart()
+        }
+    }
+
+    /**
+     * 这条视频现在还能不能播；能播返回 null，否则返回一句给用户看的短提示。
+     *
+     * 本地文件直接看能不能读；网络条目先看当前配置是否仍覆盖这个位置（不需要联网），
+     * 再问一次服务器文件还在不在。
+     */
+    private suspend fun missingReason(item: VideoItem): String? = when (item.source) {
+        MediaSource.LOCAL -> withContext(Dispatchers.IO) {
+            if (localItemExists(item)) null else "视频文件不存在"
+        }
+
+        MediaSource.SMB -> smbMissingReason(item)
+
+        MediaSource.STREAM -> null
+    }
+
+    private fun localItemExists(item: VideoItem): Boolean {
+        val live = localEntryFor(item)
+        live.localPath?.takeIf { it.isNotBlank() }?.let { return File(it).canRead() }
+        val uri = runCatching { Uri.parse(live.uri) }.getOrNull() ?: return false
+        return when (uri.scheme) {
+            "content" -> runCatching {
+                app.contentResolver.openFileDescriptor(uri, "r")?.use { }
+            }.getOrNull() != null
+
+            "file" -> File(uri.path.orEmpty()).canRead()
+            else -> false
+        }
+    }
+
+    private suspend fun smbMissingReason(item: VideoItem): String? {
+        // 共享目录已经从网络位置里删掉 / 改成别的目录：不必联网，直接判定不存在
+        val server = serverRepo?.forSmbItem(item.serverId, item.uri) ?: return "网络位置已移除"
+        // 探测放到后台并只等一小会儿：NAS 休眠时连 TCP 都要 20 秒，
+        // 不能让用户点完以后界面毫无反应，超时就当「不知道」，交给播放页去试。
+        val probe = scope.async(Dispatchers.IO) { runCatching { SmbClient.probe(server, item.uri) } }
+        val result = withTimeoutOrNull(SMB_PROBE_WAIT_MS) { probe.await() } ?: return null
+        val cause = result.exceptionOrNull() ?: return null
+        return if (SmbErrors.isNotFound(cause)) "视频文件不存在" else null
+    }
+
     /** 读取观看历史里的续播点；看到结尾（剩不到 5 秒）就当已看完，下次从头播。 */
     private fun resumePositionOf(item: VideoItem): Long {
         // 设置里关掉「记忆播放进度」时，历史照记（历史页要显示看过），但下次必须从头播
@@ -839,8 +918,8 @@ object Playback {
         val server = serverFor(item)
         val mediaItem = buildMediaItem(item, server)
         if (mediaItem == null) {
-            // 以前这里只写一句「无法打开该视频」且不设置 item，播放页显示「未在播放」，
-            // 用户既不知道是哪一条失败，也分不清是文件没了还是格式不支持。
+            // 走到这里说明预检放行了、构造却失败（例如探测之后文件才被删掉）。
+            // 提示只说要紧的一句：播放页上就是一块黑底，字数越多越难读。
             _state.update {
                 it.copy(
                     item = item,
@@ -850,13 +929,10 @@ object Playback {
                     buffering = false,
                     preparing = false,
                     error = when {
-                        item.source == MediaSource.LOCAL ->
-                            "播放失败：文件已不在设备上（可能被删除或移走）"
-                        item.source == MediaSource.SMB && server == null ->
-                            "播放失败：这条视频已不存在，它所在的共享目录不在当前网络位置中"
-                        item.source == MediaSource.SMB ->
-                            "播放失败：这个共享位置打不开，请检查网络与服务器"
-                        else -> "播放失败：这个链接打不开"
+                        item.source == MediaSource.SMB && server == null -> "网络位置已移除"
+                        item.source == MediaSource.SMB -> "无法打开网络文件"
+                        item.source == MediaSource.LOCAL -> "视频文件不存在"
+                        else -> "无法打开该链接"
                     },
                 )
             }
@@ -2025,11 +2101,7 @@ object Playback {
                 return
             }
             val message = if (item?.source == MediaSource.SMB) {
-                if (notFound) {
-                    "播放失败：共享目录里找不到这个文件，可能已被删除、改名或移走"
-                } else {
-                    SmbErrors.describe(cause)
-                }
+                if (notFound) "视频文件不存在" else SmbErrors.brief(cause)
             } else {
                 playbackErrorMessage(error)
             }
@@ -2047,30 +2119,30 @@ object Playback {
     }
 
     /**
-     * 失败提示按错误码分开说。
+     * 播放页的错误文案：只说要紧的一句。
      *
-     * 文件白名单里留着一些 Media3 没有提取器的封装（wmv / rmvb / mxf 等），以前一律提示
-     * 「无法解码或网络不可达」，用户分不清是文件本身不支持还是网络问题，只能反复重试。
+     * 播放页是黑底中央的一行字，写给"现在要不要换一条"看的，不是给排查问题看的；
+     * 详细原因仍会写进 logcat，网络页的测试与诊断也照旧给出完整说明。
      */
     private fun playbackErrorMessage(error: PlaybackException): String = when (error.errorCode) {
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
         PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED ->
-            "播放失败：这个文件的封装格式不受支持"
+            "不支持的格式"
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
-            "播放失败：文件已损坏或下载不完整"
+            "文件已损坏"
         PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
         PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ->
-            "播放失败：没有可用的解码器"
+            "没有可用的解码器"
         PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ->
-            "播放失败：文件不存在或已被移动"
+            "视频文件不存在"
         PlaybackException.ERROR_CODE_IO_NO_PERMISSION ->
-            "播放失败：没有读取该文件的权限"
+            "没有读取权限"
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
         PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-            "播放失败：网络连接失败"
-        else -> "播放失败：文件无法解码或网络不可达"
+            "网络连接失败"
+        else -> "无法播放"
     }
 
     private fun onPlaybackEnded() {

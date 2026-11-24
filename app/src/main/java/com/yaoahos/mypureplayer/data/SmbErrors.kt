@@ -102,6 +102,40 @@ object SmbErrors {
         }
     }
 
+    /**
+     * 播放页用的短提示：只说「是什么问题」，不再附带一整段怎么办。
+     *
+     * 播放页只是黑底上的一行字，写给"要不要换一条"看；排查细节留给网络页的
+     * 连接测试与诊断（[describe]），完整异常链照旧写进 logcat。
+     */
+    fun brief(t: Throwable): String {
+        if (isNotFound(t)) return "视频文件不存在"
+        val chain = flatten(t)
+        if (chain.any {
+                it is UnknownHostException || it is ConnectException ||
+                    it is NoRouteToHostException || it is SocketTimeoutException
+            }
+        ) {
+            return "无法连接网络位置"
+        }
+        val status = chain.filterIsInstance<SMBApiException>()
+            .firstOrNull { it.statusCode != 0L }?.statusCode
+        return when (status) {
+            ACCESS_DENIED, NETWORK_ACCESS_DENIED -> "没有访问权限"
+            BAD_NETWORK_NAME, NETWORK_NAME_DELETED -> "共享目录不存在"
+            LOGON_FAILURE, WRONG_PASSWORD, NO_SUCH_USER -> "账号或密码错误"
+            else -> {
+                val text = chain.mapNotNull { it.message }.joinToString(" ").lowercase()
+                when {
+                    "access is denied" in text || "access denied" in text -> "没有访问权限"
+                    "logon failure" in text || "wrong password" in text -> "账号或密码错误"
+                    "network name cannot be found" in text -> "共享目录不存在"
+                    else -> "无法打开网络文件"
+                }
+            }
+        }
+    }
+
     /** smbj 的消息形如 `STATUS_ACCESS_DENIED (0xc0000022): ...`，取状态名足够定位 */
     private fun statusWord(message: String): String =
         Regex("STATUS_[A-Z_]+").find(message)?.value ?: message.take(60)

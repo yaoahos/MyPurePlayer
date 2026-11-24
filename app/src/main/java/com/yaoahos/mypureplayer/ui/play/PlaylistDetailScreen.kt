@@ -257,8 +257,9 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                             SelectionAction(Icons.Rounded.PlayArrow, "播放", enabled = soloItem != null) {
                                 soloItem?.let { item ->
                                     val start = allMembers.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
-                                    Playback.play(allMembers, start)
-                                    navController.navigate(Routes.PLAYER)
+                                    Playback.playChecked(allMembers, start) {
+                                        navController.navigate(Routes.PLAYER)
+                                    }
                                 }
                                 selection.exit()
                             },
@@ -336,8 +337,9 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                         // 搜索/排序只影响展示，不应改变队列的实际顺序。
                         fun playAt(item: VideoItem) {
                             val start = allMembers.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
-                            Playback.play(allMembers, start)
-                            navController.navigate(Routes.PLAYER)
+                            Playback.playChecked(allMembers, start) {
+                                navController.navigate(Routes.PLAYER)
+                            }
                         }
                         // 点卡片先闪一次再播放/跳页：立即跳页会让卡片当场销毁，
                         // 按压淡片一帧都没画出来（用户看到的就是"点了没反应"）。
@@ -381,8 +383,9 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                     )
                                     .glassPressable(role = Role.Button, radius = PageMetrics.CardRadius) {
                                         flashClick {
-                                            Playback.play(members, 0)
-                                            navController.navigate(Routes.PLAYER)
+                                            Playback.playChecked(members, 0) {
+                                                navController.navigate(Routes.PLAYER)
+                                            }
                                         }
                                     }
                                     .padding(horizontal = 16.dp, vertical = 14.dp),

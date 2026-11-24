@@ -325,8 +325,7 @@ class MainActivity : FragmentActivity() {
                 // file:// 入口必须带真实路径，否则同目录外挂字幕探测会落空
                 localPath = if (data.scheme == "file") data.path else null,
             )
-            Playback.playSingle(item)
-            Playback.requestOpenPlayer()
+            Playback.playChecked(listOf(item), 0)
         }
     }
 

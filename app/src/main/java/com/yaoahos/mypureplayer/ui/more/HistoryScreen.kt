@@ -465,8 +465,12 @@ private fun resume(
         // 否则会默默播成同目录的第一条（用户感知就是「点历史播错了/打不开」）
         val index = list.indexOfFirst {
             it.id == stub.id || (stub.localPath != null && it.localPath == stub.localPath)
-        }.coerceAtLeast(0)
-        Playback.play(list, index, start)
-        navController.navigate(Routes.PLAYER)
+        }
+        // 同目录里已经找不到这一条：只拿它自己去做存在性检查，查不到就提示，
+        // 不能按 0 起播改成同目录的第一条
+        val queue = if (index >= 0) list else listOf(stub)
+        Playback.playChecked(queue, index.coerceAtLeast(0), start) {
+            navController.navigate(Routes.PLAYER)
+        }
     }
 }

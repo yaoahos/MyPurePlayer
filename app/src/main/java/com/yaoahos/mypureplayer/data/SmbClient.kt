@@ -207,6 +207,23 @@ object SmbClient {
         entries.filter { it.isDirectory || Formats.isVideo(it.name) }
 
     /**
+     * 探测共享里的某个文件现在还能不能打开。
+     *
+     * 就是一次 CREATE + CLOSE：比「列一遍父目录再找文件名」少一次往返，而且能同时
+     * 发现「文件被删/改名」与「账号没有读权限」。探测走预览连接，不占用播放那条，
+     * 免得用户点一下就把正在播的流挤在后面。
+     */
+    suspend fun probe(server: SmbServer, url: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val loc = SmbPath.split(nativeUrl(url))
+            if (loc.share.isEmpty() || loc.path.isEmpty()) {
+                throw SmbFailure("这不是一个共享里的文件：$url")
+            }
+            withConnection(server, preview = true) { it.openReader(loc).close() }
+        }
+    }
+
+    /**
      * 共享里的系统/回收站目录，逐个按 NAS 厂商与 Windows 的实际名字匹配。
      *
      * 名字统一小写比较；`#recycle` 在每个共享根目录都有一份，而且里面往往还能再看到

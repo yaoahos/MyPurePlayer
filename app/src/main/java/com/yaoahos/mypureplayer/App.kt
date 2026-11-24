@@ -121,6 +121,9 @@ class App : Application() {
 
     /** 冷启动与回到前台共用一份逻辑；[force] 为 false 时受节流窗口约束 */
     private suspend fun checkUpdate(force: Boolean) {
+        // 调试包是另一个应用，在线更新装的是正式包（等于在旁边多装一个），
+        // 自动检查只会带来一个点了也装不了的弹窗
+        if (BuildConfig.DEBUG) return
         // 两条路径可能同时到达（冷启动后立刻回到前台），只放行一个请求
         if (!updateCheckGate.tryLock()) return
         try {

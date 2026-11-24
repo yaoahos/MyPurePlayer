@@ -816,8 +816,9 @@ private fun playFromFolder(
     val list: List<VideoItem> = SmbClient.toVideoItems(server, entries, folderPath)
     val index = list.indexOfFirst { it.uri == item.uri }
     val queue = if (index >= 0) list else listOf(item)
-    Playback.play(queue, if (index >= 0) index else 0)
-    navController.navigate(Routes.PLAYER)
+    Playback.playChecked(queue, if (index >= 0) index else 0) {
+        navController.navigate(Routes.PLAYER)
+    }
 }
 
 /**

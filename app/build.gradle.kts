@@ -24,10 +24,6 @@ val keystoreProperties = Properties().apply {
 // 拿不到 variant.versionName，这里自己持有一份，避免两处不同步。
 val appVersionName = "1.0.3"
 
-// -PtestVersionCode 打出来的是真机验证用的临时包：versionCode 会被抬高，
-// 为避免和正式版混淆，桌面名称、产物文件名都带「测试版」标识（debug 构建另有「调试版」）。
-val isTestRelease = project.hasProperty("testVersionCode")
-
 android {
     namespace = "com.yaoahos.mypureplayer"
     // 最新的 AndroidX（core 1.19 / compose-ui 1.12）要求 compileSdk ≥ 37。
@@ -40,16 +36,13 @@ android {
         applicationId = "com.yaoahos.mypureplayer"
         minSdk = 24
         targetSdk = 36
-        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3，1.0.3 = 4）。每次真机验证都要覆盖安装，
-        // MIUI 不允许 versionCode 不高于已装版本的包降级/同版本覆盖（会要求先卸载），
-        // 所以测试包允许临时抬高：./gradlew assembleRelease -PtestVersionCode=1001
-        // 不传这个参数时仍是正式版本号，打出来的包可直接发布。
-        // 测试包另用 debug 证书签名、并带 .test 包名后缀（见 buildTypes.release）：
-        // 与正式包互不覆盖、可并排安装，验证时不必卸载正式版。
-        versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 4
+        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3，1.0.3 = 4）。
+        // 调试包是独立包名（.debug 后缀）、独立的应用，不需要抬高版本号来覆盖；
+        // 需要拿真机验证新改动时直接 assembleDebug 即可，与正式版并存。
+        versionCode = 4
         versionName = appVersionName
-        manifestPlaceholders["appLabel"] =
-            if (isTestRelease) "@string/app_name_test" else "@string/app_name"
+        // 桌面名称：正式版用 app_name，debug 构建在 buildTypes 里换成「调试版」
+        manifestPlaceholders["appLabel"] = "@string/app_name"
     }
 
     // 签名配置：凭据来自不入库的 signing/keystore.properties。
@@ -92,24 +85,20 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // 正式包必须使用私有证书；不再使用公开 debug 签名。
-            // 测试包（带 -PtestVersionCode）改用 debug 证书，并把包名换成 .test 后缀：
-            // 两者 applicationId 不同，系统视为两个应用，可与正式包并排安装、互不覆盖。
-            // 代价是数据目录独立（/data/data/<applicationId>/），设置、SMB 服务器、
-            // 播放列表、播放历史与缩略图缓存都不共享，测试包需要重新配置一遍。
-            if (isTestRelease) applicationIdSuffix = ".test"
-            signingConfig = if (isTestRelease) {
-                signingConfigs.getByName("debug")
-            } else {
-                signingConfigs.getByName("release")
-            }
+            // 正式包只用私有证书（凭据见 signingConfigs.release）。
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
+            // 调试包 = 另一个应用，不是同一个应用的另一个版本：
+            //   - 包名加 .debug 后缀，可与正式包并排安装、互不覆盖；
+            //   - 桌面名称「MyPurePlayer 调试版」，图标下能一眼分清；
+            //   - 版本名带 -debug，关于页/错误上报里也不会看错；
+            //   - 用项目内 signing/ 的 debug 证书，正式包始终是私有证书。
+            // 代价是数据目录独立（/data/data/<applicationId>/）：设置、网络位置、播放列表、
+            // 历史与缩略图缓存都不共享，调试包需要重新配一遍。
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            // 桌面名称也带标识：调试包与正式包可以并排安装，不能只看版本号区分
             manifestPlaceholders["appLabel"] = "@string/app_name_debug"
-            // 显式使用 signing/ 内的 debug 密钥（见 signingConfigs）
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -178,9 +167,7 @@ androidComponents {
     onVariants { variant ->
         val buildType = variant.buildType ?: "release"
         variant.outputs.forEach { output ->
-            // 测试包产物额外带 -test，避免误把临时包当成正式包上传
-            val testSuffix = if (isTestRelease) "-test" else ""
-            output.outputFileName.set("MyPurePlayer-$appVersionName-$buildType$testSuffix.apk")
+            output.outputFileName.set("MyPurePlayer-$appVersionName-$buildType.apk")
         }
     }
 }
