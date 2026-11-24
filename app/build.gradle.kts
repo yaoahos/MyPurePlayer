@@ -24,6 +24,10 @@ val keystoreProperties = Properties().apply {
 // 拿不到 variant.versionName，这里自己持有一份，避免两处不同步。
 val appVersionName = "1.0.2"
 
+// -PtestVersionCode 打出来的是真机验证用的临时包：versionCode 会被抬高，
+// 为避免和正式版混淆，桌面名称、产物文件名都带「测试版」标识（debug 构建另有「调试版」）。
+val isTestRelease = project.hasProperty("testVersionCode")
+
 android {
     namespace = "com.yaoahos.mypureplayer"
     // 最新的 AndroidX（core 1.19 / compose-ui 1.12）要求 compileSdk ≥ 37。
@@ -42,6 +46,8 @@ android {
         // 不传这个参数时仍是正式版本号，打出来的包可直接发布。
         versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 3
         versionName = appVersionName
+        manifestPlaceholders["appLabel"] =
+            if (isTestRelease) "@string/app_name_test" else "@string/app_name"
     }
 
     // 签名配置：凭据来自不入库的 signing/keystore.properties。
@@ -90,6 +96,8 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            // 桌面名称也带标识：调试包与正式包可以并排安装，不能只看版本号区分
+            manifestPlaceholders["appLabel"] = "@string/app_name_debug"
             // 显式使用 signing/ 内的 debug 密钥（见 signingConfigs）
             signingConfig = signingConfigs.getByName("debug")
         }
@@ -159,7 +167,9 @@ androidComponents {
     onVariants { variant ->
         val buildType = variant.buildType ?: "release"
         variant.outputs.forEach { output ->
-            output.outputFileName.set("MyPurePlayer-$appVersionName-$buildType.apk")
+            // 测试包产物额外带 -test，避免误把临时包当成正式包上传
+            val testSuffix = if (isTestRelease) "-test" else ""
+            output.outputFileName.set("MyPurePlayer-$appVersionName-$buildType$testSuffix.apk")
         }
     }
 }

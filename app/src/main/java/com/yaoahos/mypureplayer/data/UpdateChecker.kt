@@ -245,13 +245,22 @@ object UpdateChecker {
         if (downloaded.packageName != OFFICIAL_PACKAGE) {
             throw IllegalStateException("安装包包名不匹配，已拒绝安装")
         }
-        // versionCode 必须为正数且不低于当前版本，防止被替换成旧包
+        // 必须和系统的安装判定同口径：PackageInstaller 用 versionCode 决定是否允许覆盖，
+        // MIUI 等厂商还会直接拒绝 versionCode 回退。这里若改用 versionName 放行，
+        // 只是把失败从"明确的版本提示"推迟到系统那句含糊的"应用未安装"，更糟。
+        // 测试包（-PtestVersionCode 抬高）本就不该被正式包覆盖，拦住是正确行为；
+        // 但提示要说清原因和出路，别让用户以为更新包坏了。
         @Suppress("DEPRECATION")
-        val currentCode = runCatching { pm.getPackageInfo(context.packageName, 0).versionCode }.getOrDefault(0)
+        val currentCode = runCatching {
+            pm.getPackageInfo(context.packageName, 0).versionCode
+        }.getOrDefault(0)
         @Suppress("DEPRECATION")
         val downloadedCode = downloaded.versionCode
         if (downloadedCode <= 0 || downloadedCode < currentCode) {
-            throw IllegalStateException("安装包版本异常，已拒绝安装")
+            throw IllegalStateException(
+                "当前安装的是内部测试版本（版本号 $currentCode），无法直接更新到正式版" +
+                    "（版本号 $downloadedCode）。请先卸载当前版本，再安装正式版。"
+            )
         }
 
         val downloadedSigs = signaturesOf(downloaded)

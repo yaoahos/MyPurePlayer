@@ -1,6 +1,11 @@
 package com.yaoahos.mypureplayer.data
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
+import com.yaoahos.mypureplayer.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -80,6 +85,32 @@ object UpdatePrompt {
         } ?: return
         val apkUrl = target.apkUrl ?: return
         if (_download.value?.running == true) return
+
+        // 下载进度与完成提醒都靠通知栏。Android 13+ 必须运行时授权，
+        // 而更新这条路径以前从没申请过，notify() 抛的 SecurityException 被
+        // UpdateNotifications 里的 runCatching 吞掉，表现为"下载时通知栏毫无动静"。
+        // 这里补一次申请；不阻断下载——用户拒绝也照常下，只是没有通知，
+        // 弹窗内的进度和"已下载"提示仍然可用。
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            val appForNotify = context.applicationContext
+            runCatching {
+                MainActivity.requestPermission(context, Manifest.permission.POST_NOTIFICATIONS) { granted ->
+                    if (!granted) return@requestPermission
+                    // 小包在用户点"允许"之前可能已经下完，那次 completed() 的通知因无权限被吞。
+                    // 授权生效后按当前状态补发一次，避免通知栏始终空着。
+                    val current = _download.value ?: return@requestPermission
+                    val path = current.apkPath
+                    when {
+                        path != null -> UpdateNotifications.completed(appForNotify, target.version, path)
+                        current.running -> UpdateNotifications.progress(appForNotify, current.progress)
+                    }
+                }
+            }
+        }
+
         // 启动检查这条路径：用户可能在下到一半时把弹窗关了。下载完成后要能把
         // "已下载，是否安装"重新弹回来，否则只剩通知栏一个入口。
         val restoreOnDone = info == null
