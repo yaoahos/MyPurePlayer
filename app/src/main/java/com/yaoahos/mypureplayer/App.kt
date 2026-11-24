@@ -15,10 +15,17 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 
 class App : Application() {
 
     private val bootScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 自动检查更新的互斥锁：冷启动与回到前台可能同时触发 */
+    private val updateCheckGate = Mutex()
+
+    /** 回到前台补查的最小间隔；冷启动不受它限制 */
+    private val checkIntervalMs = 6L * 60 * 60 * 1000
 
     override fun onCreate() {
         super.onCreate()
@@ -85,7 +92,7 @@ class App : Application() {
     /**
      * 冷启动自动检查更新。
      *
-     * 开关打开且距上次**成功**检查超过 6 小时 → 问一次 GitHub，有新版本就弹窗带上发布说明。
+     * 开关打开就问一次 GitHub，有新版本就弹窗带上发布说明。
      * 只在请求成功后写回时间：网络失败不占用节流窗口，下次启动会重试，
      * 避免发布当天老用户因为一次超时要等满 24 小时才收到提示。
      * 升级后的「本次更新内容」不再弹窗，版本说明统一放在关于页的更新日志里。
@@ -96,19 +103,41 @@ class App : Application() {
         bootScope.launch {
             // 等首帧渲染完再联网，避免和媒体扫描、libVLC 初始化抢资源
             delay(2_000L)
-            val settings = runCatching { Graph.settings.settings.first() }.getOrNull() ?: return@launch
-            if (!settings.autoCheckUpdate) return@launch
-            val now = System.currentTimeMillis()
-            if (now - settings.lastUpdateCheck < 6L * 60 * 60 * 1000) return@launch
+            // 冷启动每次都查，不受节流限制：应用一直挂着、只在窗口内开关几次的用户，
+            // 否则会一直错过发布提示（表现为「从来不会自动检查更新」）。
+            checkUpdate(force = true)
+        }
+    }
 
-            val current = BuildConfig.VERSION_NAME
-            val result = UpdateChecker.check(UpdateChecker.DEFAULT_REPO, current).getOrNull()
-                ?: return@launch
-            // 请求成功才写回；失败保留原时间戳，下次启动重试
+    /**
+     * 回到前台时补一次检查。
+     *
+     * 只在冷启动查的话，把应用留在后台一整天的人永远等不到第二次 ——
+     * 这条路径按 6 小时节流，避免每次切回来都发一次请求。
+     */
+    fun checkUpdateOnForeground() {
+        bootScope.launch { checkUpdate(force = false) }
+    }
+
+    /** 冷启动与回到前台共用一份逻辑；[force] 为 false 时受节流窗口约束 */
+    private suspend fun checkUpdate(force: Boolean) {
+        // 两条路径可能同时到达（冷启动后立刻回到前台），只放行一个请求
+        if (!updateCheckGate.tryLock()) return
+        try {
+            val settings = runCatching { Graph.settings.settings.first() }.getOrNull() ?: return
+            if (!settings.autoCheckUpdate) return
+            val now = System.currentTimeMillis()
+            if (!force && now - settings.lastUpdateCheck < checkIntervalMs) return
+
+            val result = UpdateChecker.check(UpdateChecker.DEFAULT_REPO, BuildConfig.VERSION_NAME)
+                .getOrNull() ?: return
+            // 请求成功才写回；失败保留原时间戳，下次进来重试
             runCatching { Graph.settings.setLastUpdateCheck(now) }
             if (result.hasUpdate) {
-                UpdatePrompt.showNewVersion(result, UpdateLog.load(this@App))
+                UpdatePrompt.showNewVersion(result, UpdateLog.load(this))
             }
+        } finally {
+            updateCheckGate.unlock()
         }
     }
 }

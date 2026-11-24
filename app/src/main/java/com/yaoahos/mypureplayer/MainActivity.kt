@@ -85,6 +85,13 @@ class MainActivity : FragmentActivity() {
         handleInstallIntent(intent)
     }
 
+    override fun onStart() {
+        super.onStart()
+        // 只靠 Application.onCreate 检查的话，常驻后台的应用永远等不到第二次；
+        // 这里回到前台时补一次（按 6 小时节流，不会每次切回来都请求）
+        (application as? App)?.checkUpdateOnForeground()
+    }
+
     override fun onDestroy() {
         runCatching { unregisterReceiver(pipReceiver) }
         super.onDestroy()

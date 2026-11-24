@@ -833,10 +833,10 @@ object Playback {
         // 2.4G 省电带来的 20ms 往返会把码率打到 1MB/s 上下（就是「快进要等」的原因）。
         holdWifi(item.source == MediaSource.SMB)
 
-        val server = item.serverId.takeIf { it > 0L }?.let { serverRepo?.byId(it) }
-            // serverId 对不上（服务器删了重建、或条目来自另一台设备的备份）时，
-            // 用 uri 里的 host 找一台同主机的服务器兜底，否则这条永远打不开。
-            ?: if (item.source == MediaSource.SMB) serverRepo?.byHost(item.uri) else null
+        // SMB：只认「当前配置里仍然覆盖这个位置」的服务器（host + 共享名都对得上）。
+        // 历史 / 播放列表存的是加入时的快照，共享被移除、默认目录被改、或 IP 分给了
+        // 另一台机器之后，照旧地址去连只会打开到别处，必须按文件不存在处理。
+        val server = serverFor(item)
         val mediaItem = buildMediaItem(item, server)
         if (mediaItem == null) {
             // 以前这里只写一句「无法打开该视频」且不设置 item，播放页显示「未在播放」，
@@ -853,9 +853,9 @@ object Playback {
                         item.source == MediaSource.LOCAL ->
                             "播放失败：文件已不在设备上（可能被删除或移走）"
                         item.source == MediaSource.SMB && server == null ->
-                            "播放失败：这条视频所属的网络服务器不在这台设备上，请先添加该共享"
+                            "播放失败：这条视频已不存在，它所在的共享目录不在当前网络位置中"
                         item.source == MediaSource.SMB ->
-                            "播放失败：找不到这个共享位置，请检查网络与服务器"
+                            "播放失败：这个共享位置打不开，请检查网络与服务器"
                         else -> "播放失败：这个链接打不开"
                     },
                 )
@@ -939,6 +939,15 @@ object Playback {
         if (selfReadable) return item
         return localRepo?.relocate(item) ?: item
     }
+
+    /**
+     * 这条条目现在还能用哪台服务器。
+     *
+     * 判断规则统一放在 [com.yaoahos.mypureplayer.data.ServerRepo.forSmbItem]：
+     * 只有当前配置仍然覆盖这个位置（host 与共享名）才返回，否则一律当作文件不存在。
+     */
+    private fun serverFor(item: VideoItem): SmbServer? =
+        if (item.source == MediaSource.SMB) serverRepo?.forSmbItem(item.serverId, item.uri) else null
 
     private fun buildMediaItem(item: VideoItem, server: SmbServer?): MediaItem? {
         return try {
@@ -1332,8 +1341,9 @@ object Playback {
         return when (item.source) {
             MediaSource.LOCAL -> LocalStreamServer.lanUrlFor(app, item)
             MediaSource.SMB -> {
-                val server = item.serverId.takeIf { it > 0 }?.let { serverRepo?.byId(it) }
-                if (server != null) LocalStreamServer.lanUrlForSmb(app, item, server) else item.uri
+                // 与播放走同一套匹配：共享已经不在当前配置里就不投，别把电视引到一个空地址
+                val server = serverFor(item)
+                if (server != null) LocalStreamServer.lanUrlForSmb(app, item, server) else null
             }
             MediaSource.STREAM -> item.uri
         }
@@ -1653,7 +1663,7 @@ object Playback {
     /** 从网络目录手动挑中任意字幕文件（URL 可来自别的目录） */
     fun selectSubtitleUrl(url: String, name: String) {
         val current = _state.value.item ?: return
-        val server = current.serverId.takeIf { it > 0L }?.let { serverRepo?.byId(it) }
+        val server = serverFor(current)
         if (server == null || !url.startsWith("smb://")) {
             restartWithSubtitle(url, name, expectedItemId = current.id)
             return
@@ -1687,7 +1697,7 @@ object Playback {
             _state.update { it.copy(autoSubtitleName = sub.name) }
             return
         }
-        val server = current.serverId.takeIf { it > 0L }?.let { serverRepo?.byId(it) }
+        val server = serverFor(current)
         when {
             sub.uri.startsWith("smb://") && server != null -> selectSubtitleUrl(sub.uri, sub.name)
             sub.uri.startsWith("file://") -> restartWithSubtitle(
@@ -1915,7 +1925,7 @@ object Playback {
                         }
                     }
                     _state.value.item?.let { playingItem ->
-                        val server = playingItem.serverId.takeIf { it > 0L }?.let { serverRepo?.byId(it) }
+                        val server = serverFor(playingItem)
                         Thumbnails.markPlayed(app, playingItem, server)
                     }
                 }
@@ -1997,9 +2007,13 @@ object Playback {
             }
             // 网络视频（SMB / http 串流）：重建媒体并回到原位置再试一次。
             // HTTP 短链跳转、Wi-Fi 瞬断经常只失败一次；直接弹错误页会让人以为链接失效。
+            // 文件确实不在共享里时不重试：再连一次也只会拿到同一个 STATUS_OBJECT_NAME_NOT_FOUND。
+            val cause = error.cause ?: error
+            val notFound = item?.source == MediaSource.SMB && SmbErrors.isNotFound(cause)
             if (item != null &&
                 (item.source == MediaSource.SMB || item.source == MediaSource.STREAM) &&
-                !retriedNetwork
+                !retriedNetwork &&
+                !notFound
             ) {
                 retriedNetwork = true
                 startAt(
@@ -2011,7 +2025,11 @@ object Playback {
                 return
             }
             val message = if (item?.source == MediaSource.SMB) {
-                SmbErrors.describe(error.cause ?: error)
+                if (notFound) {
+                    "播放失败：共享目录里找不到这个文件，可能已被删除、改名或移走"
+                } else {
+                    SmbErrors.describe(cause)
+                }
             } else {
                 playbackErrorMessage(error)
             }

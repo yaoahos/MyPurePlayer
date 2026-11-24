@@ -100,16 +100,39 @@ class ServerRepo(context: Context) {
     fun byId(id: Long): SmbServer? = _servers.value.firstOrNull { it.id == id }
 
     /**
-     * 按主机地址找服务器。
+     * 给历史记录 / 播放列表里的 SMB 条目找「现在还挂着」的服务器。
      *
-     * 播放列表 / 历史里的 SMB 条目记的是「加入那一刻的 serverId」。服务器被删掉重建、
-     * 或配置来自另一台设备的备份时，id 对不上就取不到服务器，表现是「地址没变却
-     * 一直提示打不开」。host 是真正决定连到哪台机器的东西，用它兜底。
+     * 只认两种情况：serverId 精确命中且这台服务器仍覆盖该位置；或者当前配置里有
+     * host 与共享名都对得上的服务器（服务器删掉重建、配置从另一台设备恢复之后）。
+     *
+     * 不按 host 单独兜底。同一个 IP 可能因为 DHCP 换了机器，用户也可能把默认共享
+     * 改成了另一个目录 —— 照历史地址继续取，会打开到别处的东西：同名文件照样能播，
+     * 其它报「打不开」，用户看到的就是「目录已经换了，却还能播之前的视频」。
+     * 匹配不上返回 null，由调用方按「文件不存在」处理，不发这次注定错误的连接。
      */
-    fun byHost(host: String): SmbServer? {
-        val h = host.trim().substringAfter("smb://").substringBefore('/').substringBefore(':')
-        if (h.isBlank()) return null
-        return _servers.value.firstOrNull { it.host.trim().substringBefore(':').equals(h, ignoreCase = true) }
+    fun forSmbItem(serverId: Long, uri: String): SmbServer? {
+        val parsed = SmbInput.parse(uri)
+        val host = parsed.host.trim().lowercase()
+        // 只取共享名：后面那段是共享内的目录与文件名，与服务器配置无关
+        val share = parsed.share.substringBefore('/').trim().lowercase()
+        if (host.isBlank() || share.isBlank()) return null
+        val exact = serverId.takeIf { it > 0L }?.let { byId(it) }
+        if (exact != null && exact.covers(host, share)) return exact
+        return _servers.value.firstOrNull { it.covers(host, share) }
+    }
+
+    /**
+     * 这台服务器的共享根是否覆盖 [host] / [share] 指向的位置。
+     *
+     * 服务器填了默认共享目录时要求共享名一致；没填的（先连服务器、再逐层浏览的那种
+     * 配置）只看主机 —— 那种条目本来就散落在同一台机器的不同共享里。
+     */
+    private fun SmbServer.covers(host: String, share: String): Boolean {
+        val own = SmbInput.parse(this.host)
+        if (own.host.trim().lowercase() != host) return false
+        val ownShare = own.share.substringBefore('/').trim().lowercase()
+            .ifBlank { this.share.trim().trim('/').lowercase() }
+        return ownShare.isBlank() || ownShare == share
     }
 }
 

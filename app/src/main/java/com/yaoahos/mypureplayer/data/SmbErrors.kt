@@ -36,6 +36,26 @@ object SmbErrors {
     fun isInvalidParameter(t: Throwable): Boolean =
         flatten(t).filterIsInstance<SMBApiException>().any { it.statusCode == INVALID_PARAMETER }
 
+    /**
+     * 目标文件或目录在共享里不存在（被删除、改名、移走）。
+     *
+     * 历史记录 / 播放列表里的条目常常是「共享还在、文件没了」：这时不该再让用户
+     * 去检查目录名与大小写，也不能把这次失败当瞬时故障重试一遍。
+     */
+    fun isNotFound(t: Throwable): Boolean {
+        val chain = flatten(t)
+        if (chain.filterIsInstance<SMBApiException>().any {
+                it.statusCode == OBJECT_NAME_NOT_FOUND || it.statusCode == OBJECT_PATH_NOT_FOUND
+            }
+        ) {
+            return true
+        }
+        val text = chain.mapNotNull { it.message }.joinToString(" ").lowercase()
+        return "cannot find the file" in text ||
+            "object name not found" in text ||
+            "object path not found" in text
+    }
+
     /** 返回一句「原因 + 该怎么办」，用于提示条与错误页。 */
     fun describe(t: Throwable): String {
         // 把完整异常链打到 logcat：Android 上的失败原因和 JVM 常常不同，

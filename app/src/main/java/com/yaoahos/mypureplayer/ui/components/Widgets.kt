@@ -104,9 +104,12 @@ fun VideoThumb(
     // 订阅服务器列表而非 remember 缓存：首帧组合时 servers 可能还没加载完，
     // 缓存一个 null 会导致该缩略图永远走不到 HTTP 抽帧分支。
     val servers by Graph.servers.servers.collectAsStateWithLifecycle()
-    val server = if (item.source == MediaSource.SMB) {
-        servers.firstOrNull { it.id == item.serverId }
-    } else null
+    // 匹配规则与播放一致：共享已经不在当前配置里的旧条目不去连，直接没有封面
+    val server = remember(item.id, item.uri, servers) {
+        if (item.source == MediaSource.SMB) {
+            Graph.servers.forSmbItem(item.serverId, item.uri)
+        } else null
+    }
     // 播放登记「已播放」后 playedVersion 变化，触发重新取缩略图（低频事件，可作 key）
     val playedVersion by Thumbnails.playedVersion.collectAsStateWithLifecycle()
     val bitmap by produceState<BitmapHolder?>(

@@ -417,8 +417,8 @@ private suspend fun HistoryEntry.fullItem(): VideoItem {
     val fresh = when (source) {
         MediaSource.LOCAL -> Graph.local.videos.value.firstOrNull { it.id == videoId }
         MediaSource.SMB -> {
-            val server = Graph.servers.byId(serverId)
-                ?: Graph.servers.servers.value.firstOrNull { it.id == serverId }
+            // 共享已被移除 / 默认目录改过时不拿历史地址去连，详情就用手头保存的快照
+            val server = Graph.servers.forSmbItem(serverId, uri)
             server?.let { srv ->
                 runCatching { SmbClient.toVideoItems(srv, SmbClient.list(srv, folderKey), folderKey) }
                     .getOrNull()?.firstOrNull { it.id == videoId }
@@ -450,7 +450,7 @@ private fun resume(
         val list: List<VideoItem> = when (entry.source) {
             MediaSource.LOCAL -> Graph.local.videosInFolder(entry.folderKey).ifEmpty { listOf(stub) }
             MediaSource.SMB -> {
-                val server = Graph.servers.byId(entry.serverId) ?: Graph.servers.servers.value.firstOrNull { it.id == entry.serverId }
+                val server = Graph.servers.forSmbItem(entry.serverId, entry.uri)
                 val remote = if (server != null) {
                     runCatching {
                         SmbClient.toVideoItems(server, SmbClient.list(server, entry.folderKey), entry.folderKey)

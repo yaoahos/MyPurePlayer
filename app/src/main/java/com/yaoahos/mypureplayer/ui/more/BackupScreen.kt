@@ -524,7 +524,7 @@ fun BackupScreen(navController: NavHostController) {
                             modifier = Modifier.width(17.dp),
                         )
                     },
-                    text = "云端按设备各存一份：文件名带设备名与 4 位短码，同型号两台设备也不会互相覆盖。" +
+                    text = "云端按设备各存一份：文件名带设备名与 4 位编号，同型号两台设备也不会互相覆盖。" +
                         "备份文件整体加密，密码保存在本机，用于手动与自动备份；遗失后无法还原。" +
                         "WebDAV 连接修改后点「保存」生效，测试只验证不保存；保存不会当场上传，" +
                         "第一次备份要等自动备份周期到点，手动上传请点「上传」。",
@@ -560,7 +560,7 @@ fun BackupScreen(navController: NavHostController) {
                 )
                 if (deviceId.isNotBlank()) {
                     Text(
-                        "短码 $deviceId（固定不变，用于区分同型号设备）",
+                        "$deviceId（固定不变，用于区分同型号设备）",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp),
@@ -672,20 +672,16 @@ fun BackupScreen(navController: NavHostController) {
             files.forEach { file ->
                 GlassChoiceRow(
                     icon = Icons.Rounded.PhoneAndroid,
-                    title = file.label,
+                    // 标题只放设备名：短码在副标题里另有展示，两处都写会把长设备名挤到截断
+                    title = file.deviceName.ifBlank { "未知设备" },
                     subtitle = buildString {
-                        // 「本机」放在副标题开头：标题会被设备名占满并截断，
-                        // 挂在标题尾巴上可能根本看不到
+                        // 「本机」放在副标题开头：标题被设备名占满时也能看到
                         if (file.isLocal) append("本机 · ")
-                        // 短码放在标题下方：设备名再长被截断，也能靠这四位区分同型号设备
-                        append(
-                            if (file.deviceId.isNotBlank()) {
-                                "短码 ${file.deviceId}"
-                            } else {
-                                "旧版备份 · 无短码"
-                            },
-                        )
-                        append(" · ")
+                        // 短码只留四位本身，含义由下方的设备短码说明解释
+                        if (file.deviceId.isNotBlank()) {
+                            append(file.deviceId)
+                            append(" · ")
+                        }
                         if (file.modified > 0) {
                             append(
                                 SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())

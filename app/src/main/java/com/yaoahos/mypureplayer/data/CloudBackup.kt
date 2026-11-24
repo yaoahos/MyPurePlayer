@@ -33,10 +33,7 @@ object CloudBackup {
         val modified: Long,
         val isLocal: Boolean = false,
         val legacy: Boolean = false,
-    ) {
-        /** 「Xiaomi 14 · 3f9a」；旧版单文件没有短码时只显示名字。 */
-        val label: String get() = if (deviceId.isBlank()) deviceName else "$deviceName · $deviceId"
-    }
+    ) {}
 
     data class UploadResult(val at: Long, val fileName: String)
 
