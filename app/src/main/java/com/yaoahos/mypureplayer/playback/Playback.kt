@@ -2263,6 +2263,9 @@ object Playback {
     private fun recordHistory(force: Boolean) {
         val s = _state.value
         val item = s.item ?: return
+        // 无痕播放：只停止新增记录，已有历史一条都不动。
+        // 闸门放在最前面，暂停 / 切后台 / 退出播放页 / 换片所有入口都从这里过，不会漏。
+        if (settings.incognito) return
         // 已经被从队列里摘掉的条目不要再回写历史。
         // 删除视频时顺序是「摘队列 → 清历史」：摘队列会触发 stopInternal，那里的
         // recordHistory(force) 是异步的 —— 少了这道闸，它会在清理之后把刚删掉的

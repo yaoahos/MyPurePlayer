@@ -112,6 +112,8 @@ fun VideoThumb(
     }
     // 播放登记「已播放」后 playedVersion 变化，触发重新取缩略图（低频事件，可作 key）
     val playedVersion by Thumbnails.playedVersion.collectAsStateWithLifecycle()
+    // 「重置缩略图」后 epoch 变化：没有这个 key，卡片会一直显示手里那张旧图
+    val thumbEpoch by Thumbnails.epoch.collectAsStateWithLifecycle()
     val bitmap by produceState<BitmapHolder?>(
         initialValue = null,
         item.id,
@@ -119,6 +121,7 @@ fun VideoThumb(
         item.sizeBytes,
         server?.id,
         playedVersion,
+        thumbEpoch,
     ) {
         value = Thumbnails.load(context, item, server)?.let { BitmapHolder(it) }
         // 全局 thumbVersion（每次后台抽帧落盘 +1）不能放进 key：那会让「一张图完成」

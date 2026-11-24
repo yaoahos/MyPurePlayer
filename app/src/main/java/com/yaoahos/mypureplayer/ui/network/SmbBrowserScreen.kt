@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Tune
@@ -423,6 +424,27 @@ fun SmbBrowserScreen(
                             selection.exit()
                         },
                     ) + listOfNotNull(
+                        // 网络封面是按帧猜的：不满意就换下一档取帧策略重来，连着点会在
+                        // 几种画面之间循环。放进「更多」，不占主操作位。
+                        soloVideo?.let { target ->
+                            SelectionAction(
+                                Icons.Rounded.Refresh,
+                                "重置缩略图",
+                                enabled = canAct,
+                            ) {
+                                selection.exit()
+                                scope.launch {
+                                    val ok = runCatching {
+                                        Thumbnails.resetThumbnail(context, target, activeServer)
+                                    }.getOrDefault(false)
+                                    if (ok) {
+                                        Notice.success("已换一帧画面")
+                                    } else {
+                                        Notice.error("这个视频取不到其它画面")
+                                    }
+                                }
+                            }
+                        },
                         // 只清观看记录，不动 NAS 上的文件；选中项没有历史时置灰。
                         // 用 forceMore 收进「更多」，不挤占播放/详情/加入列表三个主操作。
                         // 文件夹没有观看记录：只选中文件夹时这一项不出现。

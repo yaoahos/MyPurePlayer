@@ -202,7 +202,6 @@ fun SettingsScreen(navController: NavHostController) {
                         Text(
                             "播放顺序",
                             style = MaterialTheme.typography.titleSmall,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(
@@ -230,6 +229,16 @@ fun SettingsScreen(navController: NavHostController) {
                     checked = settings.resumePlayback,
                     onCheckedChange = { scope.launch { Graph.settings.setResumePlayback(it) } },
                 )
+                // 无痕放在「记忆播放进度」下方：两者都是「记不记」的事，挨着读得通
+                SettingsSwitchRow(
+                    title = "无痕播放",
+                    subtitle = "不记录新的观看历史与播放进度，已有记录不受影响",
+                    checked = settings.incognito,
+                    onCheckedChange = {
+                        scope.launch { Graph.settings.setIncognito(it) }
+                        Notice.success(if (it) "已开启无痕播放" else "已关闭无痕播放")
+                    },
+                )
                 SettingsSwitchRow(
                     title = "回到桌面时开启小窗",
                     subtitle = "播放中回到桌面时自动进入画中画",
@@ -250,7 +259,6 @@ fun SettingsScreen(navController: NavHostController) {
                         Text(
                             "视频缩略图缓存",
                             style = MaterialTheme.typography.titleSmall,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(
@@ -274,7 +282,6 @@ fun SettingsScreen(navController: NavHostController) {
                         Text(
                             "配置备份",
                             style = MaterialTheme.typography.titleSmall,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(

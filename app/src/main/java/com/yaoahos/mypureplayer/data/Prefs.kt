@@ -60,6 +60,13 @@ data class AppSettings(
      */
     val playMode: Int = 1,
     val resumePlayback: Boolean = true,
+    /**
+     * 无痕播放：开启后不再写新的观看历史与播放进度，已有记录保留不动。
+     *
+     * 只是「不记新的」，不做任何删除 —— 用户想清空历史有独立的删除入口，
+     * 一个开关顺手抹掉记录会让人措手不及。
+     */
+    val incognito: Boolean = false,
     /** 启动时检查更新（默认开启：只在发现新版本时弹窗，平时静默） */
     val autoCheckUpdate: Boolean = true,
     /** 上次自动检查更新的时间，用于节流 */
@@ -87,6 +94,7 @@ class SettingsRepo(private val context: Context) {
         val autoNext = booleanPreferencesKey("auto_next")
         val playMode = intPreferencesKey("play_mode")
         val resume = booleanPreferencesKey("resume")
+        val incognito = booleanPreferencesKey("incognito")
         val autoCheckUpdate = booleanPreferencesKey("auto_check_update")
         val lastUpdateCheck = longPreferencesKey("last_update_check")
         val pipOnHome = booleanPreferencesKey("pip_on_home")
@@ -108,6 +116,7 @@ class SettingsRepo(private val context: Context) {
             autoPlayNext = prefs[Keys.autoNext] ?: true,
             playMode = prefs[Keys.playMode] ?: if (prefs[Keys.autoNext] == false) 0 else 1,
             resumePlayback = prefs[Keys.resume] ?: true,
+            incognito = prefs[Keys.incognito] ?: false,
             autoCheckUpdate = prefs[Keys.autoCheckUpdate] ?: true,
             lastUpdateCheck = prefs[Keys.lastUpdateCheck] ?: 0L,
             pipOnHome = prefs[Keys.pipOnHome] ?: true,
@@ -176,6 +185,10 @@ class SettingsRepo(private val context: Context) {
 
     suspend fun setResumePlayback(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.resume] = value }
+    }
+
+    suspend fun setIncognito(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.incognito] = value }
     }
 
     suspend fun setAutoCheckUpdate(value: Boolean) {

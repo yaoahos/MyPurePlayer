@@ -26,8 +26,43 @@ class TrashRepo(
     private val onRestored: suspend (List<String>) -> Unit = {},
 ) {
 
-    private val root: File
+    /**
+     * 旧版回收站目录（应用私有）。
+     *
+     * 现在不再往这里放新文件，但历史版本删进回收站的条目还躺在这儿，
+     * 读写都要兼容，否则升级后回收站里的东西会「全部消失」。
+     */
+    private val legacyRoot: File
         get() = File(context.getExternalFilesDir(null) ?: context.filesDir, "trash")
+
+    /**
+     * 回收站根目录：**必须与源文件同卷**。
+     *
+     * 老实现固定放在应用私有的 `/Android/data/<包名>/files/trash`，而
+     * `/storage/emulated/0/Android/data` 是单独挂载点（与 `/storage/emulated/0`
+     * 不同设备号）。跨挂载点 `rename` 只会返回 EXDEV，代码只好退化成整文件复制 ——
+     * 一个几 GB 的视频要几十秒，用户感受就是「删除特别慢」。
+     *
+     * 改成放在源文件所在卷的 `/Android/media/<包名>/trash`：它和公共媒体目录在
+     * 同一个挂载点上，rename 命中即瞬间完成。`.nomedia` 保证回收站里的文件
+     * 不会被媒体库收录。
+     */
+    private fun rootFor(sourcePath: String): File {
+        val volume = volumeRootOf(sourcePath) ?: return legacyRoot.also { it.mkdirs() }
+        val dir = File(volume, "Android/media/${context.packageName}/trash")
+        if (!dir.isDirectory && !dir.mkdirs()) return legacyRoot.also { it.mkdirs() }
+        val noMedia = File(dir, ".nomedia")
+        if (!noMedia.exists()) runCatching { noMedia.createNewFile() }
+        return dir
+    }
+
+    /** 从绝对路径取所在存储卷的根：/storage/emulated/0、/storage/XXXX-XXXX */
+    private fun volumeRootOf(path: String): File? {
+        val segs = path.trim().split('/').filter { it.isNotEmpty() }
+        if (segs.size < 3 || segs[0] != "storage") return null
+        val root = if (segs[1] == "emulated") File("/storage/emulated/${segs[2]}") else File("/storage/${segs[1]}")
+        return root.takeIf { it.isDirectory }
+    }
 
     private val store = JsonStore(
         File(context.filesDir, "trash.json"),
@@ -44,7 +79,16 @@ class TrashRepo(
         cleanOrphans()
     }
 
-    fun fileOf(entry: TrashEntry): File = File(root, entry.storedName)
+    /**
+     * 回收站条目的落盘位置。
+     *
+     * 新条目把绝对路径整体存进 `storedName`（回收站可能在任意一卷的 Android/media 下）；
+     * 旧条目只存文件名，仍按应用私有目录解析。
+     */
+    fun fileOf(entry: TrashEntry): File {
+        val raw = entry.storedName
+        return if (raw.startsWith("/")) File(raw) else File(legacyRoot, raw)
+    }
 
     fun totalSize(): Long = _entries.value.sumOf { it.sizeBytes }
 
@@ -104,7 +148,7 @@ class TrashRepo(
             val members = paths.filter { File(it).parentFile?.absolutePath == dir.absolutePath }
 
             val stored = "${System.currentTimeMillis()}_${dir.name}"
-            val bucket = File(root, stored)
+            val bucket = File(rootFor(dir.absolutePath), stored)
             if (!bucket.mkdirs() && !bucket.isDirectory) {
                 return@withLock Result.failure(IllegalStateException("没有写入权限，请开启「所有文件访问权限」"))
             }
@@ -154,7 +198,7 @@ class TrashRepo(
                 width = 0,
                 height = 0,
                 deletedAt = System.currentTimeMillis(),
-                storedName = stored,
+                storedName = bucket.absolutePath,
                 isFolder = true,
                 fileCount = moved,
             )
@@ -179,9 +223,10 @@ class TrashRepo(
         isFolder: Boolean,
         fileCount: Int,
     ): Result<TrashEntry> {
+        // 目标目录按源文件所在的卷算，保证 rename 走的是同一挂载点（见 rootFor）
+        val bucket = rootFor(source.absolutePath)
         val stored = "${System.currentTimeMillis()}_$fileName"
-        val target = File(root, stored)
-        root.mkdirs()
+        val target = File(bucket, stored)
 
         if (!movePath(source, target)) {
             runCatching { if (target.isDirectory) target.deleteRecursively() else target.delete() }
@@ -200,7 +245,7 @@ class TrashRepo(
             width = width,
             height = height,
             deletedAt = System.currentTimeMillis(),
-            storedName = stored,
+            storedName = target.absolutePath,
             isFolder = isFolder,
             fileCount = fileCount,
         )
@@ -355,13 +400,20 @@ class TrashRepo(
     /** 清空回收站 */
     suspend fun clear() = withContext(Dispatchers.IO) {
         mutex.withLock {
+            // 回收站可能分散在多个卷（内置存储 / SD 卡），按条目实际位置逐个删，
+            // 再把用到的目录本身也扫一遍，清掉没记进 JSON 的残留文件
+            val dirs = HashSet<String>()
             _entries.value.forEach {
                 runCatching {
                     val f = fileOf(it)
+                    f.parentFile?.let { p -> dirs += p.absolutePath }
                     if (f.isDirectory) f.deleteRecursively() else f.delete()
                 }
             }
-            root.listFiles()?.forEach { runCatching { it.deleteRecursively() } }
+            dirs += legacyRoot.absolutePath
+            dirs.forEach { d ->
+                File(d).listFiles()?.forEach { runCatching { it.deleteRecursively() } }
+            }
             store.write(emptyList())
             _entries.value = emptyList()
         }

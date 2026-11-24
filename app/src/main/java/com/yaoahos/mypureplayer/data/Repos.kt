@@ -130,8 +130,12 @@ class ServerRepo(context: Context) {
     private fun SmbServer.covers(host: String, share: String): Boolean {
         val own = SmbInput.parse(this.host)
         if (own.host.trim().lowercase() != host) return false
+        // 只比共享名的**第一段**：服务器配置里常把入口写到子目录
+        // （Backup/PT/临时），而浏览出来的条目地址里只有共享名（Backup）。
+        // 旧实现拿整串 "backup/pt/临时" 去比 "backup"，永远不等 ——
+        // 表现就是从网络位置刚进去点视频，就提示「网络位置已移除」。
         val ownShare = own.share.substringBefore('/').trim().lowercase()
-            .ifBlank { this.share.trim().trim('/').lowercase() }
+            .ifBlank { this.share.trim().trim('/').substringBefore('/').lowercase() }
         return ownShare.isBlank() || ownShare == share
     }
 }

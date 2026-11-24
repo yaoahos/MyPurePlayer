@@ -23,6 +23,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -151,6 +153,28 @@ object Thumbnails {
     // 压掉近一半；只在浏览态生效，播放时由 remotePaused 整体挡住，不会和首帧抢带宽。
     private val remoteSemaphore = Semaphore(2)
     private val knownDurations = ConcurrentHashMap<String, Long>()
+
+    /**
+     * 「重置缩略图」点过几次。
+     *
+     * 抽帧本身是猜：自动挑选只能保证「不是黑场/白闪」，未必是用户想要的那一帧。
+     * 每点一次换成下一档取帧策略（见 [bitmapFromRetriever] 的 variant 分支），
+     * 走完一轮回到自动模式，于是一个视频可以在几种画面之间循环。
+     */
+    private val variants = ConcurrentHashMap<String, Int>()
+
+    /** 取帧策略档位数：0 为自动，1..5 为固定时间点 */
+    private const val VARIANT_COUNT = 6
+
+    /**
+     * 缩略图重置计数。
+     *
+     * 卡片在 `produceState` 里拿到图之后就不再重新取值了，重置时必须有一个 key 变化
+     * 才能让屏幕上的卡片重新读缓存 —— 否则「换了图但界面还是旧图」。
+     */
+    private val _epoch = MutableStateFlow(0)
+    val epoch: StateFlow<Int> = _epoch
+
 
     /**
      * 已知分辨率。
@@ -455,6 +479,45 @@ object Thumbnails {
         return withContext(Dispatchers.IO) { loadSlow(context, item, server, key, remote, maxWidth) }
     }
 
+    /**
+     * 重置某个视频的缩略图：丢掉当前这张，换下一档取帧策略重新生成。
+     *
+     * 抽帧是猜的，自动挑选只保证「不是黑场/白闪/纯色」，未必是用户想看到的那一帧。
+     * 这里每调用一次就换一档（自动 → 30% → 45% → 60% → 75% → 90% → 自动），
+     * 用户可以一直点到自己满意为止。
+     *
+     * 同时清掉「取不出画面」的判定与失败计数：用户明确要求重来，就不该被之前的
+     * 结论挡住。
+     *
+     * @return 是否成功拿到新图；取不出画面时返回 false，由调用方给出提示
+     */
+    suspend fun resetThumbnail(
+        context: Context,
+        item: VideoItem,
+        server: SmbServer? = null,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (item.source == MediaSource.STREAM) return@withContext false
+        val key = keyOf(item)
+        variants[key] = ((variants[key] ?: 0) + 1) % VARIANT_COUNT
+
+        memory.remove(key)
+        artwork.remove(key)
+        inflight.remove(key)
+        unsupported.remove(item.id)
+        deepFallbackUsed.remove(item.id)
+        failCounts.remove(key)
+        retryCounts.remove(key)
+        runCatching { File(cacheDir(context), "$key.$CACHE_VERSION.jpg").delete() }
+        runCatching { noThumbMark(context, item).delete() }
+        // 先叫醒卡片重新取值，再生成：生成完成后 thumbVersion 还会再触发一轮
+        _epoch.value += 1
+
+        load(context, item, server) != null
+    }
+
+    /** 当前这一轮用第几档取帧策略（0 = 自动），只用于界面提示 */
+    fun variantOf(item: VideoItem): Int = variants[keyOf(item)] ?: 0
+
     private suspend fun loadSlow(
         context: Context,
         item: VideoItem,
@@ -623,6 +686,8 @@ object Thumbnails {
     private suspend fun extract(context: Context, item: VideoItem, server: SmbServer?): Bitmap? {
         val remote = item.source == MediaSource.SMB
         val maxWidth = if (remote) MAX_WIDTH_REMOTE else MAX_WIDTH_LOCAL
+        // 0 = 自动挑选；1..5 = 用户点过「重置缩略图」后固定取片长的某个百分比
+        val variant = variants[keyOf(item)] ?: 0
         // 并发许可由 extractOutcome 统一持有（那里还负责计时），这里只负责干活。
         return run {
             run {
@@ -647,7 +712,9 @@ object Thumbnails {
                             //    MediaDataSource 让系统解码器自己去尾部定位，容器无关。
                             val container = Formats.extensionOf(item.fileName).lowercase()
                             val ebml = container == "mkv" || container == "webm" || container == "mka"
-                            if (ebml) {
+                            // 手动换图（variant > 0）时不走片头探针：探针只能取前十几秒，
+                            // 而用户要的正是「换一帧」，必须让解码器按索引跳到片长其它位置。
+                            if (ebml && variant == 0) {
                                 val probe = buildProbeFile(context, item, srv)
                                 if (probe != null) {
                                     try {
@@ -718,7 +785,7 @@ object Thumbnails {
                             }
                             // 非 EBML（MP4/MOV），或结构没解析出来（扩展名不实）：
                             // 交给 MediaDataSource 让解码器自己定位 moov，容器无关。
-                            val viaSource = retrieveViaSource(context, item, srv, maxWidth)
+                            val viaSource = retrieveViaSource(context, item, srv, maxWidth, variant = variant)
                             if (viaSource != null) {
                                 Log.d(
                                     TAG,
@@ -855,6 +922,7 @@ object Thumbnails {
         nearStart: Boolean = false,
         fewProbes: Boolean = false,
         extraDepth: Int = 0,
+        variant: Int = 0,
     ): Bitmap? {
         val durationMs = runCatching {
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
@@ -884,7 +952,7 @@ object Thumbnails {
             }
         }
 
-        return bitmapFromRetriever(retriever, maxWidth, nearStart, fewProbes, extraDepth)
+        return bitmapFromRetriever(retriever, maxWidth, nearStart, fewProbes, extraDepth, variant)
     }
 
     /**
@@ -1122,6 +1190,7 @@ object Thumbnails {
         server: SmbServer,
         maxWidth: Int,
         timeoutMs: Long = 7_000L,
+        variant: Int = 0,
     ): Bitmap? = withContext(Dispatchers.IO) {
         val holder = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
         val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
@@ -1138,6 +1207,7 @@ object Thumbnails {
                         maxWidth,
                         nearStart = false,
                         fewProbes = true,
+                        variant = variant,
                     ),
                 )
             } catch (t: Throwable) {
@@ -1169,6 +1239,8 @@ object Thumbnails {
         // 只留「片长 10%」和「第一帧」两次，把失败尝试的流量省下来。
         fewProbes: Boolean = false,
         extraDepth: Int = 0,
+        /** 0 = 自动挑选；1..5 = 用户手动换图时固定的片长百分比档位 */
+        variant: Int = 0,
     ): Bitmap? {
         val durationMs = runCatching {
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
@@ -1180,6 +1252,20 @@ object Thumbnails {
             0L
         }
         val times = when {
+            // 用户点过「重置缩略图」：按档位取片长的固定比例，一档一档换过去。
+            // 每档再带上前后两个邻近点，避免正好落在转场、淡入淡出或纯色画面上。
+            // 没有时长信息时退回一组绝对时间点（15/30/60 秒），总有能出图的一帧。
+            variant > 0 -> {
+                val fractions = floatArrayOf(0.30f, 0.45f, 0.60f, 0.75f, 0.90f)
+                val fraction = fractions[(variant - 1) % fractions.size]
+                if (durationMs > 0L) {
+                    val center = (durationMs * 1_000L * fraction).toLong()
+                    val step = 12_000_000L
+                    longArrayOf(center, center + step, center - step, center + 2 * step)
+                } else {
+                    longArrayOf(15_000_000L, 30_000_000L, 60_000_000L)
+                }
+            }
             // 片头文件是被截断的前若干 MB：只能取片头几秒的画面，
             // 按「片长 10%」去取必然落在文件之外，所有时间点都会失败。
             // 顺序很关键：先试 3 秒、5 秒（越过黑场与台标），最后才退回第一帧，
