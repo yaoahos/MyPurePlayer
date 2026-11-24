@@ -136,6 +136,8 @@ import com.yaoahos.mypureplayer.data.SubtitleFile
 import com.yaoahos.mypureplayer.data.SubtitleTrack
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.media.Thumbnails
+import com.yaoahos.mypureplayer.data.AppSettings
+import com.yaoahos.mypureplayer.data.Graph
 import com.yaoahos.mypureplayer.playback.Playback
 import com.yaoahos.mypureplayer.ui.components.DurationBadge
 import com.yaoahos.mypureplayer.ui.components.GlassIconButton
@@ -197,6 +199,7 @@ fun PlayerScreen(navController: NavHostController) {
     val tracks by Playback.subtitleTracks.collectAsStateWithLifecycle()
     val subtitleFiles by Playback.subtitleFiles.collectAsStateWithLifecycle()
     val audioTracks by Playback.audioTracks.collectAsStateWithLifecycle()
+    val pipOnHome by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
 
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -346,6 +349,15 @@ fun PlayerScreen(navController: NavHostController) {
         activity?.let { com.yaoahos.mypureplayer.MainActivity.refreshPipActions(it) }
     }
 
+    // Android 12+ 的系统自动小窗：参数必须在用户离开**之前**写好。
+    // 只靠 refreshPipActions（进小窗后才调）时，系统按 Home 读到的仍是默认
+    // 参数（autoEnter=false），结果回桌面只暂停、不进小窗。
+    // 具体开不开由 syncAutoEnterPip 按「播放页在前台 + 真在播」判断：
+    // 播完/暂停/退回列表都会立刻把 autoEnter 关掉，不会再从别的页面误进小窗。
+    LaunchedEffect(state.item?.id, state.playing, state.videoWidth, state.videoHeight, pipOnHome, pipActive) {
+        com.yaoahos.mypureplayer.MainActivity.syncAutoEnterPip(activity)
+    }
+
     ImmersiveFullScreen()
     KeepScreenOn()
 
@@ -374,8 +386,13 @@ fun PlayerScreen(navController: NavHostController) {
         activity?.requestedOrientation = requested
     }
 
+    // 标记「播放页正在前台」，并负责离开时收回自动小窗许可。
+    // 顺序很重要：先把可见标记置 false，再同步参数，否则 syncAutoEnterPip 读到的还是旧的 true。
     DisposableEffect(Unit) {
+        Playback.playerScreenVisible = true
         onDispose {
+            Playback.playerScreenVisible = false
+            com.yaoahos.mypureplayer.MainActivity.syncAutoEnterPip(activity)
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             Playback.stopDlnaDiscovery()
         }

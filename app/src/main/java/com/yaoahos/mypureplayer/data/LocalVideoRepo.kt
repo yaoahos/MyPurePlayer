@@ -7,10 +7,13 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import com.yaoahos.mypureplayer.core.Formats
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -34,6 +37,9 @@ class LocalVideoRepo(private val context: Context) {
     private val _scanning = MutableStateFlow(false)
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
 
+    /** 后台校验死条目用；不占用扫描主路径，避免进文件夹被 File.exists() 拖慢 */
+    private val verifyScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /**
      * @param silent 静默扫描：不切换 [_scanning]，用于切 tab / ON_RESUME / 首次加载，
      *   避免明明内容没变却闪一下顶部转圈。只有用户主动下拉刷新才传 false 显示转圈。
@@ -45,6 +51,10 @@ class LocalVideoRepo(private val context: Context) {
             // 切 tab / ON_RESUME 会重复扫描。内容没变时不替换列表对象，
             // 避免整页重组造成"切到首页闪一下"。只有真正增删/改动才更新。
             if (found != _videos.value) _videos.value = found
+            // 死条目校验放到后台：旧实现在扫描主路径上逐条 File.exists()，
+            // SD 卡休眠 / 媒体库很大时会把「进文件夹」拖成几十秒（用户反馈的
+            // 「偶尔刷新几十秒才展示」）。现在列表先出，再异步摘掉不存在的条目。
+            verifyScope.launch { dropMissing(found) }
             found.size
         } catch (e: SecurityException) {
             android.util.Log.w("LocalVideoRepo", "扫描被拒绝", e)
@@ -108,11 +118,9 @@ class LocalVideoRepo(private val context: Context) {
 
                 val id = c.getLong(idIdx)
                 val data = if (dataIdx >= 0) c.getString(dataIdx) else null
-                // MediaStore 里的行不一定跟着物理文件一起消失：在文件管理器里删掉视频后，
-                // 旧行可能还留着。只查库不校验文件，列表里就会出现"点进去文件不存在"的死条目，
-                // 而且手动刷新只会再查一次同样的库，怎么刷都刷不掉。
-                // DATA 不可得时不猜（部分机型返回空），沿用 contentUri 播放。
-                if (!data.isNullOrBlank() && !File(data).exists()) continue
+                // MediaStore 行可能比物理文件活得久（文件管理器删除不经过本应用）。
+                // 这里不再逐条 File.exists()：那是扫描路径上的同步 I/O，慢存储上
+                // 几百条就能拖几十秒。改成扫完由 [dropMissing] 在后台对账摘除。
                 val contentUri = ContentUris.withAppendedId(collection, id)
                 val bucketId = if (bucketIdIdx >= 0 && !c.isNull(bucketIdIdx)) c.getString(bucketIdIdx) else null
                 val bucketName = if (bucketNameIdx >= 0) c.getString(bucketNameIdx) else null
@@ -152,6 +160,20 @@ class LocalVideoRepo(private val context: Context) {
      * 如果只等刷新去重新 query，删除后短时间内那条死记录还在；用户在文件管理器里删的
      * 文件更是根本不经过本应用。这里按 id 或原路径对账，立刻把列表收紧。
      */
+    /**
+     * 后台对账：MediaStore 里有行、但真实文件已经不在了。
+     *
+     * 只处理拿得到 localPath 的条目；DATA 不可得时宁可留着（不能误删用户可见的条目）。
+     * 发现死条目后走 [dropGone] 从当前列表摘掉，与手动删除后的即时清理同一条路径。
+     */
+    private fun dropMissing(items: List<VideoItem>) {
+        if (items.isEmpty()) return
+        val gone = items.filter { item ->
+            item.localPath?.let { path -> path.isNotBlank() && !File(path).exists() } == true
+        }
+        if (gone.isNotEmpty()) dropGone(gone)
+    }
+
     fun dropGone(items: Collection<VideoItem>) {
         if (items.isEmpty()) return
         val ids = items.map { it.id }.toSet()
@@ -177,6 +199,32 @@ class LocalVideoRepo(private val context: Context) {
     suspend fun freshById(id: String): VideoItem? {
         scan(silent = true)
         return _videos.value.firstOrNull { it.id == id }
+    }
+
+    /**
+     * 在已加载的本地库里重新定位一条记录。
+     *
+     * 播放列表、历史记录里存的本地条目是「加入那一刻」的快照：`content://` 行号在
+     * 重新扫描媒体库、文件被移动/重命名后可能失效，从别的设备恢复的备份更是整批
+     * 对不上。播放前用这个函数把旧快照换成当前库里真实存在的条目，避免出现
+     * 「地址没变却打不开」。
+     *
+     * 匹配顺序：真实路径 → id → 文件名（同名多条时用大小消歧）。
+     */
+    fun relocate(item: VideoItem): VideoItem? {
+        val all = _videos.value
+        if (all.isEmpty()) return null
+        item.localPath?.takeIf { it.isNotBlank() }?.let { path ->
+            all.firstOrNull { it.localPath == path }?.let { return it }
+        }
+        all.firstOrNull { it.id == item.id }?.let { return it }
+        val sameName = all.filter { it.fileName.equals(item.fileName, ignoreCase = true) }
+        return when {
+            sameName.isEmpty() -> null
+            item.sizeBytes > 0L ->
+                sameName.firstOrNull { it.sizeBytes == item.sizeBytes } ?: sameName.first()
+            else -> sameName.first()
+        }
     }
 
     /** 按文件夹 key（MediaStore bucket id）重新取这一组视频 */

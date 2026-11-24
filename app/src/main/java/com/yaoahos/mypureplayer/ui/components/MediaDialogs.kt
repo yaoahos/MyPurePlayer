@@ -289,54 +289,6 @@ fun FolderInfoDialog(
 }
 
 /**
- * 网络连接长按操作面板（替代原三点菜单）：测试连接 / 编辑 / 删除。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ServerActionSheet(
-    name: String,
-    onDismiss: () -> Unit,
-    onTest: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    AdaptiveSheet(onDismiss = onDismiss) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.secondaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Rounded.Cloud,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-            }
-            Text(
-                name,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = 14.dp),
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth()) {
-            ActionRow(Icons.Rounded.NetworkCheck, "测试连接") { onDismiss(); onTest() }
-            ActionRow(Icons.Rounded.Edit, "编辑") { onDismiss(); onEdit() }
-            ActionDivider()
-            ActionRow(Icons.Rounded.DeleteOutline, "删除", destructive = true) { onDismiss(); onDelete() }
-        }
-    }
-}
-
-/**
  * 宽度自适应的底部面板：窄屏占满宽度；宽屏按内容收缩并居中，避免选项被拉散。
  *
  * 底层用自研的 [AppBottomSheet] 而不是 Material3 的 `ModalBottomSheet`：
@@ -603,15 +555,22 @@ fun RenameDialog(
     )
 }
 
-/** 信息面板里的「位置」：本地给真实路径，网络共享给去掉 scheme 的地址（与浏览页标题一致） */
+/**
+ * 信息面板里的「位置」。
+ *
+ * 本地给真实路径；网络共享给完整 `smb://` 地址 —— 与播放页的「串流地址」、
+ * 共享列表的副标题统一：都带协议前缀，复制出去即可直接使用。
+ * 只剥掉 `user:pass@`，凭据不该出现在可复制的文本里。
+ */
 private fun locationOf(item: VideoItem): String = when (item.source) {
     com.yaoahos.mypureplayer.data.MediaSource.LOCAL -> item.localPath ?: item.folderName
-    else -> item.uri.removePrefix("smb://")
+    else -> item.uri.replace(Regex("^(smb://)[^/@]+@"), "$1")
 }
 
 /** 视频信息 */
 @Composable
 fun MediaInfoDialog(item: VideoItem, onDismiss: () -> Unit) {
+    val context = LocalContext.current
     val date = if (item.dateModified > 0) {
         SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(item.dateModified))
     } else "未知"
@@ -635,9 +594,12 @@ fun MediaInfoDialog(item: VideoItem, onDismiss: () -> Unit) {
                 // 只读 item.durationMs 会显示 00:00，而列表卡片明明是 22:51。
                 val durationMs = Thumbnails.displayDuration(item).takeIf { it > 0L } ?: item.durationMs
                 InfoRow("时长", if (durationMs > 0L) Formats.formatDuration(durationMs) else "未知")
+                // 网络视频的宽高同样不在条目上：抽帧/播放时解析出来记进了 Thumbnails 缓存，
+                // 和时长一样做一次兜底读取，否则信息页永远是「未知」。
+                val size = remember(item.id) { Thumbnails.cachedSize(context, item) }
                 InfoRow(
                     "分辨率",
-                    if (item.width > 0 && item.height > 0) "${item.width} × ${item.height}" else "未知",
+                    if (size != null) "${size.first} × ${size.second}" else "未知",
                 )
                 InfoRow("修改时间", date)
                 InfoRow(

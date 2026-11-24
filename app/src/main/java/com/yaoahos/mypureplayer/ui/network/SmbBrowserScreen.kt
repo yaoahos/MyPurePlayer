@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -69,6 +70,7 @@ import com.yaoahos.mypureplayer.data.SortKey
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.playback.Playback
 import com.yaoahos.mypureplayer.ui.Routes
+import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.DurationBadge
 import com.yaoahos.mypureplayer.ui.components.EmptyState
 import com.yaoahos.mypureplayer.ui.components.FolderInfoDialog
@@ -134,6 +136,8 @@ fun SmbBrowserScreen(
         }
     }
     val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    // 「删除历史」按选中视频是否有观看记录决定是否置灰
+    val history by Graph.history.history.collectAsStateWithLifecycle()
     var server by remember(serverId) { mutableStateOf(Graph.servers.byId(serverId)) }
     // 进出文件夹是新路由实例：用内存缓存同步预填列表与加载态，
     // 第一帧即有内容，不会闪「加载中/刷新图标」（cachedList 是纯内存查找，组合期调用安全）
@@ -168,6 +172,8 @@ fun SmbBrowserScreen(
     var sortSheetOpen by remember { mutableStateOf(false) }
     var sortDraft by remember { mutableStateOf<MediaSortDraft?>(null) }
     var infoItem by remember { mutableStateOf<VideoItem?>(null) }
+    // 待确认的「删除历史」目标：只清观看记录，不动 NAS 文件
+    var pendingHistoryDelete by remember { mutableStateOf<List<VideoItem>?>(null) }
     var infoFolder by remember { mutableStateOf<Pair<SmbEntry, List<VideoItem>>?>(null) }
     // 长按只进入选择态，动作集中在顶栏 + 底部操作栏
     val selection = remember { ListSelection() }
@@ -225,6 +231,14 @@ fun SmbBrowserScreen(
         }
     }
 
+    // 每次进入目录，给这一批网络视频一次重新生成缩略图的机会。
+    // 旧逻辑对「连续两次取不出画面」落盘失败标记（有效期一周），用户第一次进目录时
+    // 网络抖动被误判后，之后再进同一个文件夹也永远只剩图标。
+    LaunchedEffect(entries, path, activeServer?.id) {
+        val srv = activeServer ?: return@LaunchedEffect
+        Thumbnails.allowRetry(context, SmbClient.toVideoItems(srv, entries, path))
+    }
+
     val sortKey = remember(sortName) { runCatching { SortKey.valueOf(sortName) }.getOrDefault(SortKey.NAME) }
     // 网络视频的时长靠抽帧补出来，补一条重排一次；其他排序方式不受影响
     val durationVersion by Thumbnails.durationVersion.collectAsStateWithLifecycle()
@@ -271,6 +285,12 @@ fun SmbBrowserScreen(
     val selectedCount = selectedVideos.size + selectedFolders.size
     val soloVideo = selectedVideos.singleOrNull()
     val soloFolder = selectedFolders.singleOrNull()
+    val historyKeys = remember(history) {
+        history.mapTo(HashSet()) { it.videoId to it.source }
+    }
+    val hasHistory = remember(selectedVideos, historyKeys) {
+        selectedVideos.any { (it.id to it.source) in historyKeys }
+    }
 
     // 添加模式下选择态是常驻的：返回键应当直接退出页面，而不是"退选择"
     BackHandler(enabled = selection.active && !addMode) { selection.exit() }
@@ -292,7 +312,7 @@ fun SmbBrowserScreen(
             // 根目录常常只有文件夹没有视频，写"0 个视频"会像出错了。
             // 带"可选"二字，避免用户以为全部数量都要加入播放列表。
             "${visibleVideos.size} 个视频可选"
-        } else path.removePrefix("smb://"),
+        } else path,
         onBack = { navController.popBackStack() },
         searchOpen = searchOpen,
         query = query,
@@ -402,7 +422,25 @@ fun SmbBrowserScreen(
                             }
                             selection.exit()
                         },
+                    ) + listOfNotNull(
+                        // 只清观看记录，不动 NAS 上的文件；选中项没有历史时置灰。
+                        // 用 forceMore 收进「更多」，不挤占播放/详情/加入列表三个主操作。
+                        // 文件夹没有观看记录：只选中文件夹时这一项不出现。
+                        if (selectedVideos.isEmpty()) {
+                            null
+                        } else {
+                            SelectionAction(
+                                Icons.Rounded.History,
+                                "删除历史",
+                                enabled = canAct && hasHistory,
+                            ) {
+                                // 只清观看记录，不动 NAS 上的文件；先确认再执行
+                                val targets = selectedVideos
+                                if (targets.isNotEmpty()) pendingHistoryDelete = targets
+                            }
+                        },
                     ),
+                    forceMore = true,
                     modifier = Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
@@ -642,7 +680,7 @@ fun SmbBrowserScreen(
     infoFolder?.let { (folder, list) ->
         FolderInfoDialog(
             name = folder.name,
-            location = folder.url.removePrefix("smb://"),
+            location = folder.url,
             videoCount = list.size,
             totalSize = list.sumOf { it.sizeBytes },
             source = "网络共享",
@@ -651,6 +689,24 @@ fun SmbBrowserScreen(
     }
 
     infoItem?.let { MediaInfoDialog(item = it, onDismiss = { infoItem = null }) }
+
+    pendingHistoryDelete?.let { targets ->
+        ConfirmDialog(
+            title = "删除观看记录",
+            message = "已选中的 ${targets.size} 个视频的观看记录将被删除，不会删除 NAS 上的文件。",
+            confirmText = "删除",
+            destructive = true,
+            onConfirm = {
+                pendingHistoryDelete = null
+                scope.launch {
+                    val n = Graph.history.removeAll(targets.map { it.id })
+                    Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
+                }
+                selection.exit()
+            },
+            onDismiss = { pendingHistoryDelete = null },
+        )
+    }
 
     // 目标播放列表由用户自己选，加入后直接回到列表详情页
     pendingAdd?.let { items ->

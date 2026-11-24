@@ -22,7 +22,7 @@ val keystoreProperties = Properties().apply {
 
 // 产物命名与版本号共用同一份常量：AGP 9 移除了旧 Variant API，
 // 拿不到 variant.versionName，这里自己持有一份，避免两处不同步。
-val appVersionName = "1.0.2"
+val appVersionName = "1.0.3"
 
 // -PtestVersionCode 打出来的是真机验证用的临时包：versionCode 会被抬高，
 // 为避免和正式版混淆，桌面名称、产物文件名都带「测试版」标识（debug 构建另有「调试版」）。
@@ -40,11 +40,11 @@ android {
         applicationId = "com.yaoahos.mypureplayer"
         minSdk = 24
         targetSdk = 36
-        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3）。每次真机验证都要覆盖安装，
+        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3，1.0.3 = 4）。每次真机验证都要覆盖安装，
         // MIUI 不允许 versionCode 不高于已装版本的包降级/同版本覆盖（会要求先卸载），
         // 所以测试包允许临时抬高：./gradlew assembleRelease -PtestVersionCode=1001
         // 不传这个参数时仍是正式版本号，打出来的包可直接发布。
-        versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 3
+        versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 4
         versionName = appVersionName
         manifestPlaceholders["appLabel"] =
             if (isTestRelease) "@string/app_name_test" else "@string/app_name"

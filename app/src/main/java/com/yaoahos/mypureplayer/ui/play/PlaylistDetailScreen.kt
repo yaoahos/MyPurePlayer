@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
@@ -106,6 +107,7 @@ import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
 import com.yaoahos.mypureplayer.ui.components.rememberMediaDuration
+import com.yaoahos.mypureplayer.ui.components.rememberResumePosition
 import com.yaoahos.mypureplayer.ui.components.selectionCardOutline
 import kotlinx.coroutines.launch
 
@@ -164,6 +166,8 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
     var infoItem by remember { mutableStateOf<VideoItem?>(null) }
     var pendingRemove by remember { mutableStateOf<Set<String>?>(null) }
     var pendingClear by remember { mutableStateOf(false) }
+    // 待确认的「删除历史」目标：只清观看记录，不移出列表
+    var pendingHistoryDelete by remember { mutableStateOf<List<VideoItem>?>(null) }
     var sortSheetOpen by remember { mutableStateOf(false) }
     var sortKey by remember { mutableStateOf(SortKey.DATE) }
     var ascending by remember { mutableStateOf(true) }
@@ -189,6 +193,12 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
         shownMembers.filter { selection.contains(it.id) }
     }
     val soloItem = selectedItems.singleOrNull()
+    val historyKeys = remember(history) {
+        history.mapTo(HashSet()) { it.videoId to it.source }
+    }
+    val hasHistory = remember(selectedItems, historyKeys) {
+        selectedItems.any { (it.id to it.source) in historyKeys }
+    }
 
     BackHandler(enabled = searchOpen) {
         searchOpen = false
@@ -259,7 +269,18 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                 // 只弹确认框，退出选择态放到确认之后；取消时保留选中项
                                 pendingRemove = selectedItems.map { it.id }.toSet()
                             },
+                            // 只清观看记录，不移出播放列表；选中项没有历史时置灰。
+                            // 用 forceMore 收进「更多」，前三个主操作保持原样。
+                            SelectionAction(
+                                Icons.Rounded.History,
+                                "删除历史",
+                                enabled = selectedItems.isNotEmpty() && hasHistory,
+                            ) {
+                                val targets = selectedItems
+                                if (targets.isNotEmpty()) pendingHistoryDelete = targets
+                            },
                         ),
+                        forceMore = true,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     )
                 }
@@ -440,7 +461,8 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                         // 只让当前这一行订阅 200ms 进度流，避免整页随进度重组。
                                         Playback.positionMs.collectAsStateWithLifecycle().value
                                     } else {
-                                        Graph.history.resumePosition(item.id, item.source)
+                                        // 订阅历史表：删除观看记录后这一行的进度条立刻消失
+                                        rememberResumePosition(item)
                                     }
                                     val progressRatio = if (total > 0L && resumeMs > 0L) {
                                         (resumeMs.toFloat() / total).coerceIn(0f, 1f)
@@ -529,7 +551,10 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                                     },
                                                     maxLines = 1,
                                                 )
-                                                // 每条有观看进度的视频都画进度条，不只是当前播放项
+                                            }
+                                            // 只有真有观看进度的视频才画进度条，不只是当前播放项。
+                                            // 看过 0 秒的视频（没点开过）不画：否则每条都挂一根空的灰色轨道。
+                                            if (progressRatio > 0f) {
                                                 Spacer(Modifier.height(4.dp))
                                                 LinearProgressIndicator(
                                                     progress = { progressRatio },
@@ -596,6 +621,24 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
     }
 
     infoItem?.let { MediaInfoDialog(item = it, onDismiss = { infoItem = null }) }
+
+    pendingHistoryDelete?.let { targets ->
+        ConfirmDialog(
+            title = "删除观看记录",
+            message = "已选中的 ${targets.size} 个视频的观看记录将被删除，视频仍保留在列表里。",
+            confirmText = "删除",
+            destructive = true,
+            onConfirm = {
+                pendingHistoryDelete = null
+                scope.launch {
+                    val n = Graph.history.removeAll(targets.map { it.id })
+                    Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
+                }
+                selection.exit()
+            },
+            onDismiss = { pendingHistoryDelete = null },
+        )
+    }
 
     pendingRemove?.let { ids ->
         ConfirmDialog(
@@ -805,7 +848,8 @@ private fun NowPlayingHero(
                 )
             }
         }
-        if (durationMs > 0L) {
+        // 没开始播（位置还是 0）时不画空轨道：与列表行、宫格卡片的判断保持一致。
+        if (durationMs > 0L && positionMs > 0L) {
             Spacer(Modifier.height(8.dp))
             LinearProgressIndicator(
                 progress = { progress },

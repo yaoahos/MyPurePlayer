@@ -35,14 +35,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
-import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.FileCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -81,6 +80,7 @@ import com.yaoahos.mypureplayer.ui.MainTab
 import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.GlassFab
 import com.yaoahos.mypureplayer.ui.components.FabInsets
+import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.EmptyState
 import com.yaoahos.mypureplayer.ui.components.ListSelection
@@ -111,7 +111,8 @@ fun NetworkScreen(navController: NavHostController) {
 
     var sheetOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<SmbServer?>(null) }
-    var deleteTarget by remember { mutableStateOf<SmbServer?>(null) }
+    // 删除先记录目标，弹确认框；单条与批量共用同一条路径
+    var pendingDelete by remember { mutableStateOf<List<SmbServer>?>(null) }
     var testing by remember { mutableStateOf<SmbServer?>(null) }
     // 长按进入选择态；动作只在顶栏与底部操作栏出现
     val selection = remember { ListSelection() }
@@ -234,21 +235,21 @@ fun NetworkScreen(navController: NavHostController) {
                             if (soloServer != null) { editing = soloServer; sheetOpen = true }
                             selection.exit()
                         },
-                        SelectionAction(Icons.Rounded.DeleteOutline, "删除", enabled = canAct, danger = true) {
-                            if (soloServer != null) {
-                                // 单选走确认框：确认后才退出选择态，取消时保留选中项
-                                deleteTarget = soloServer
-                            } else {
-                                // 多选直接删除，已真正执行，随即退出选择态
-                                scope.launch {
-                                    selectedServers.forEach {
-                                        SmbClient.invalidate(it.id)
-                                        Graph.servers.delete(it.id)
-                                    }
-                                    Notice.success("已删除 ${selectedServers.size} 个共享")
-                                }
-                                selection.exit()
+                        // 创建副本：地址、账号、共享目录一并带走，名称加「-副本」。
+                        // 用于同一台 NAS 换不同目录/账号，不必从头再填一遍。
+                        SelectionAction(Icons.Rounded.FileCopy, "创建副本", enabled = canAct) {
+                            val targets = selectedServers.toList()
+                            scope.launch {
+                                targets.forEach { s -> Graph.servers.upsert(s.copy(id = 0L, name = "${s.name}-副本")) }
+                                Notice.success(
+                                    if (targets.size == 1) "已创建副本" else "已创建 ${targets.size} 个副本",
+                                )
                             }
+                            selection.exit()
+                        },
+                        // 删除：单条与批量都要先过确认框（此处只记录目标，不直接删）
+                        SelectionAction(Icons.Rounded.DeleteOutline, "删除", enabled = canAct, danger = true) {
+                            pendingDelete = selectedServers.toList()
                         },
                     ),
                     modifier = Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -343,27 +344,30 @@ fun NetworkScreen(navController: NavHostController) {
         )
     }
 
-    deleteTarget?.let { target ->
-        AlertDialog(
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
-            tonalElevation = 0.dp,
-            onDismissRequest = { deleteTarget = null },
-            title = { Text("删除共享") },
-            text = { Text("确定删除「${target.name}」吗？已加入播放列表的条目不受影响。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    scope.launch {
-                        SmbClient.invalidate(target.id)
-                        Graph.servers.delete(target.id)
+    pendingDelete?.let { targets ->
+        ConfirmDialog(
+            title = if (targets.size == 1) "删除共享" else "删除共享位置",
+            message = if (targets.size == 1) {
+                "确定删除「${targets.first().name}」吗？已加入播放列表的条目不受影响。"
+            } else {
+                "选中的 ${targets.size} 个共享位置将被删除。已加入播放列表的条目不受影响。"
+            },
+            confirmText = "删除",
+            destructive = true,
+            onConfirm = {
+                scope.launch {
+                    targets.forEach {
+                        SmbClient.invalidate(it.id)
+                        Graph.servers.delete(it.id)
                     }
-                    deleteTarget = null
+                    Notice.success(
+                        if (targets.size == 1) "已删除共享" else "已删除 ${targets.size} 个共享",
+                    )
+                    pendingDelete = null
                     selection.exit()
-                }) { Text("删除") }
+                }
             },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
-            },
+            onDismiss = { pendingDelete = null },
         )
     }
 

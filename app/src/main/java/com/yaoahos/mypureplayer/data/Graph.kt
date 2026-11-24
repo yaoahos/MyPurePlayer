@@ -62,14 +62,18 @@ object Graph {
             // 交给两个仓库各自的回调，界面不必记得在每个恢复入口补一次。
             trash = TrashRepo(app) { paths -> afterRestore(paths) }
             vault = VaultRepo(app) { restored -> afterVaultRestore(restored) }
-            Playback.init(app, servers, history, queue, settings, progress)
+            Playback.init(app, servers, history, queue, settings, progress, local)
             ready = true
             // 启动即把历史和进度载入内存：播放器是同步读续播点的，
             // 等历史页打开才 load 会让冷启动后的第一次播放从 0 开始。
+            // 服务器与串流也要一起载入：播放列表/历史里的 SMB 条目要靠 serverId（或 host）
+            // 找回服务器配置，没载入就会「地址没变却一直提示打不开」。
             bootScope.launch {
                 history.load()
                 progress.load()
                 playlists.load()
+                servers.load()
+                streams.load()
             }
         }
     }

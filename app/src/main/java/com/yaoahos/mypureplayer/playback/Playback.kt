@@ -7,8 +7,12 @@ import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Gravity
 import android.view.PixelCopy
 import android.view.SurfaceView
+import android.view.View
+import android.view.ViewTreeObserver
+import android.widget.FrameLayout
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
@@ -26,6 +30,7 @@ import com.yaoahos.mypureplayer.R
 import com.yaoahos.mypureplayer.core.Formats
 import com.yaoahos.mypureplayer.data.AppSettings
 import com.yaoahos.mypureplayer.data.HistoryRepo
+import com.yaoahos.mypureplayer.data.LocalVideoRepo
 import com.yaoahos.mypureplayer.data.MediaSource
 import com.yaoahos.mypureplayer.data.PlaybackProgressRepo
 import com.yaoahos.mypureplayer.data.QueueRepo
@@ -96,6 +101,15 @@ object Playback {
      */
     private const val FIRST_FRAME_MAX_WAIT_MS = 20_000L
 
+    /**
+     * 播放中重新缓冲时，延迟这么久才把转圈画出来。
+     *
+     * seek 到未缓冲位置时 Media3 一定会走一次 STATE_BUFFERING，但网络/本地缓存
+     * 往往两三百毫秒就恢复。立刻显示转圈就是「每次快进都闪一下圈」——
+     * 延迟到这个阈值，短暂重缓冲根本不会上屏，真卡住了才提示。
+     */
+    private const val BUFFERING_UI_DELAY_MS = 400L
+
     /** 首帧上屏后等这么久再截缩略图：跳过片头黑场、台标与开场字幕 */
     private const val THUMB_CAPTURE_DELAY_MS = 2_500L
     /** 截到黑场（夜景/淡入）时补截一次的间隔 */
@@ -105,6 +119,9 @@ object Playback {
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
     private var attachedContainer: android.view.ViewGroup? = null
+    private var attachedLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
+    private var lastAttachedWidth = 0
+    private var lastAttachedHeight = 0
 
     /**
      * 设备当前的音频直通能力，与 [AppRenderersFactory] 交给 AudioSink 的是同一份判定。
@@ -132,6 +149,16 @@ object Playback {
     var pictureInPicture = false
         private set
 
+    /**
+     * 播放页是否正显示在屏幕上（由 PlayerScreen 的 DisposableEffect 维护）。
+     *
+     * 系统自动进小窗只应在「看着播放页」时生效。原来只要起播过一次就把
+     * autoEnter 写死为 true，用户退回列表/暂停后按 Home 仍会被拉成小窗，
+     * 小窗里显示的甚至是列表页 —— 看起来就像在软件内进了画中画。
+     */
+    @Volatile
+    var playerScreenVisible = false
+
     /** 画中画状态流：界面需要据此收起控制条，避免小窗里挤满按钮 */
     private val _pictureInPicture = MutableStateFlow(false)
     val pictureInPictureState: StateFlow<Boolean> = _pictureInPicture.asStateFlow()
@@ -139,6 +166,8 @@ object Playback {
     fun setPictureInPicture(active: Boolean) {
         pictureInPicture = active
         _pictureInPicture.value = active
+        // 进出小窗窗口尺寸都会变，比例框跟着重测，避免退回全屏后画面停在旧尺寸
+        requestVideoRelayout()
         if (!active) return
         // Media3 的 TextureView 在 PiP 尺寸变化时会自行重建 Surface，无需像 VLC 那样
         // 手动 updateVideoSurfaces；但暂停态小窗 Surface 重建后可能没有可显示的帧，
@@ -161,6 +190,7 @@ object Playback {
 
     private var serverRepo: ServerRepo? = null
     private var historyRepo: HistoryRepo? = null
+    private var localRepo: LocalVideoRepo? = null
     private var progressRepo: PlaybackProgressRepo? = null
     private var queueRepo: QueueRepo? = null
     private var settingsRepo: SettingsRepo? = null
@@ -255,11 +285,13 @@ object Playback {
         queueStore: QueueRepo,
         settingsRepo: SettingsRepo,
         progress: PlaybackProgressRepo,
+        local: LocalVideoRepo,
     ) {
         if (::app.isInitialized) return
         app = context.applicationContext
         serverRepo = servers
         historyRepo = history
+        localRepo = local
         progressRepo = progress
         queueRepo = queueStore
         this.settingsRepo = settingsRepo
@@ -399,6 +431,27 @@ object Playback {
     // ---------------------------------------------------------------- 视图挂载
 
     /**
+     * Media3 的比例框在窗口尺寸变化后偶发只按旧尺寸测量：画面缩在左上，
+     * 右侧和底部留黑。切一次比例能强制重测，但过一会又被宽高比回调拉回去。
+     * 这里在容器尺寸变化与视频尺寸变化时主动重测，保证内容框始终居中铺满可用区域。
+     */
+    private fun requestVideoRelayout() {
+        val view = playerView ?: return
+        view.post {
+            val frame = view.findViewById<View>(androidx.media3.ui.R.id.exo_content_frame)
+            (frame?.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                if (lp.gravity == Gravity.NO_GRAVITY) {
+                    lp.gravity = Gravity.CENTER
+                    frame.layoutParams = lp
+                }
+            }
+            frame?.requestLayout()
+            view.requestLayout()
+            view.videoSurfaceView?.requestLayout()
+        }
+    }
+
+    /**
      * 把播放器视图挂到 Compose AndroidView 提供的容器上。
      * 签名从旧版 VLCVideoLayout 改为通用 ViewGroup；PlayerScreen 已同步适配。
      * 画面宿主是 SurfaceView（HDR 需要独立硬件层）：它在画中画窗口里是系统推荐做法，
@@ -412,6 +465,8 @@ object Playback {
         if (attachedContainer === container && playerView?.parent === container &&
             playerView?.visibility == android.view.View.VISIBLE
         ) {
+            // 容器还是同一个，但窗口尺寸可能转过：主动重测一次，防止画面缩在左上。
+            requestVideoRelayout()
             return
         }
         // 从旧容器摘下（同样走清屏路径：横屏 → 竖屏时旧容器可能正随窗口转场）
@@ -420,6 +475,19 @@ object Playback {
         view.visibility = android.view.View.VISIBLE
         runCatching { container.addView(view, android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT) }
         attachedContainer = container
+        lastAttachedWidth = container.width
+        lastAttachedHeight = container.height
+        attachedLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+            val width = container.width
+            val height = container.height
+            if (width != lastAttachedWidth || height != lastAttachedHeight) {
+                lastAttachedWidth = width
+                lastAttachedHeight = height
+                requestVideoRelayout()
+            }
+        }
+        runCatching { container.viewTreeObserver.addOnGlobalLayoutListener(attachedLayoutListener) }
+        requestVideoRelayout()
         applyScale()
     }
 
@@ -433,6 +501,12 @@ object Playback {
      * 不用 TextureView 替代：那会丢掉 HDR 传递与色彩元数据。
      */
     private fun unmountPlayerView() {
+        attachedLayoutListener?.let { listener ->
+            runCatching { attachedContainer?.viewTreeObserver?.removeOnGlobalLayoutListener(listener) }
+        }
+        attachedLayoutListener = null
+        lastAttachedWidth = 0
+        lastAttachedHeight = 0
         blankVideoSurface()
         playerView?.let { view ->
             view.visibility = android.view.View.INVISIBLE
@@ -467,6 +541,23 @@ object Playback {
     private fun applyScale() {
         val mode = scaleModes[_state.value.scaleMode.coerceIn(0, scaleModes.lastIndex)]
         playerView?.resizeMode = mode
+        requestVideoRelayout()
+    }
+
+    /** 延迟显示的缓冲提示：短促的 seek/重缓冲不画转圈，避免每次快进都闪一下 */
+    private var bufferingHintJob: Job? = null
+
+    private fun scheduleBufferingHint() {
+        bufferingHintJob?.cancel()
+        bufferingHintJob = scope.launch {
+            delay(BUFFERING_UI_DELAY_MS)
+            _state.update { if (it.error == null && !it.preparing) it.copy(buffering = true) else it }
+        }
+    }
+
+    private fun clearBufferingHint() {
+        bufferingHintJob?.cancel()
+        bufferingHintJob = null
     }
 
     private var positionPoller: Job? = null
@@ -743,9 +834,32 @@ object Playback {
         holdWifi(item.source == MediaSource.SMB)
 
         val server = item.serverId.takeIf { it > 0L }?.let { serverRepo?.byId(it) }
+            // serverId 对不上（服务器删了重建、或条目来自另一台设备的备份）时，
+            // 用 uri 里的 host 找一台同主机的服务器兜底，否则这条永远打不开。
+            ?: if (item.source == MediaSource.SMB) serverRepo?.byHost(item.uri) else null
         val mediaItem = buildMediaItem(item, server)
         if (mediaItem == null) {
-            _state.update { it.copy(buffering = false, preparing = false, error = "无法打开该视频") }
+            // 以前这里只写一句「无法打开该视频」且不设置 item，播放页显示「未在播放」，
+            // 用户既不知道是哪一条失败，也分不清是文件没了还是格式不支持。
+            _state.update {
+                it.copy(
+                    item = item,
+                    queueIndex = index,
+                    queueSize = items.size,
+                    playing = false,
+                    buffering = false,
+                    preparing = false,
+                    error = when {
+                        item.source == MediaSource.LOCAL ->
+                            "播放失败：文件已不在设备上（可能被删除或移走）"
+                        item.source == MediaSource.SMB && server == null ->
+                            "播放失败：这条视频所属的网络服务器不在这台设备上，请先添加该共享"
+                        item.source == MediaSource.SMB ->
+                            "播放失败：找不到这个共享位置，请检查网络与服务器"
+                        else -> "播放失败：这个链接打不开"
+                    },
+                )
+            }
             return
         }
 
@@ -814,6 +928,18 @@ object Playback {
      * - 串流：原 URL（http/hls/dash/rtsp 均由对应模块支持）。
      * 外挂字幕以 SubtitleConfiguration 随媒体一起交给 libass 渲染。
      */
+    /**
+     * 把一条「可能是旧快照」的本地条目，换成当前本地库里真实存在的那一条。
+     *
+     * 自身路径能读就不用换（绝大多数情况，零开销）；读不到才去库里按
+     * 路径 / id / 文件名重新匹配。匹配不到就原样返回，由上层给出明确错误。
+     */
+    private fun localEntryFor(item: VideoItem): VideoItem {
+        val selfReadable = item.localPath?.let { File(it).canRead() } == true
+        if (selfReadable) return item
+        return localRepo?.relocate(item) ?: item
+    }
+
     private fun buildMediaItem(item: VideoItem, server: SmbServer?): MediaItem? {
         return try {
             val contentUri: Uri
@@ -840,13 +966,17 @@ object Playback {
                             return buildMediaItemWithSubtitles(Uri.parse(lanUrl), item, true)
                         }
                     }
+                    // 播放列表 / 历史里的记录是加入时的快照：content:// 行号在重新扫描、
+                    // 文件移动、或从其它设备恢复备份后会失效（表现就是「地址没变却打不开」）。
+                    // 这里先换成当前本地库里真实存在的条目，再决定用哪种地址去播。
+                    val live = localEntryFor(item)
+                    val livePath = live.localPath
                     contentUri = when {
-                        item.localPath != null && File(item.localPath).canRead() ->
-                            Uri.fromFile(File(item.localPath))
-                        item.uri.startsWith("file://") || item.uri.startsWith("content://") ->
-                            Uri.parse(item.uri)
-                        localStrategy == 0 -> Uri.parse(LocalStreamServer.urlFor(app, item))
-                        else -> Uri.parse(item.uri)
+                        livePath != null && File(livePath).canRead() -> Uri.fromFile(File(livePath))
+                        live.uri.startsWith("file://") || live.uri.startsWith("content://") ->
+                            Uri.parse(live.uri)
+                        localStrategy == 0 -> Uri.parse(LocalStreamServer.urlFor(app, live))
+                        else -> Uri.parse(live.uri)
                     }
                     isNetwork = contentUri.scheme == "http" || contentUri.scheme == "https"
                 }
@@ -1732,12 +1862,16 @@ object Playback {
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
             when (state) {
-                Player.STATE_BUFFERING -> _state.update { it.copy(buffering = true) }
+                // 延迟 400ms 再显示：seek 造成的瞬时重缓冲不应该每次都在屏幕上闪一个圈
+                Player.STATE_BUFFERING -> scheduleBufferingHint()
                 Player.STATE_READY -> {
+                    clearBufferingHint()
                     val p = player ?: return
                     _state.update {
                         it.copy(
-                            playing = p.isPlaying,
+                            // 用 playWhenReady 兜底：seek 期间 isPlaying 会短暂为 false，
+                            // 只看 isPlaying 会让暂停/播放图标在快进时来回跳。
+                            playing = p.isPlaying || p.playWhenReady,
                             // 关键：READY 只说明「缓冲够了」，不等于画面已渲染。首帧先到就撤圈；
                             // 首帧还没到就继续转，等 onRenderedFirstFrame 撤，避免出现
                             // 「转圈消失但画面还没出来」的空窗（网络视频慢时尤其明显）。
@@ -1785,11 +1919,17 @@ object Playback {
                         Thumbnails.markPlayed(app, playingItem, server)
                     }
                 }
-                Player.STATE_ENDED -> onPlaybackEnded()
+                Player.STATE_ENDED -> {
+                    clearBufferingHint()
+                    onPlaybackEnded()
+                }
                 // IDLE 只表示「当前没有媒体在准备」。setMediaItem() 后必经一次 IDLE，
                 // 如果这里把 buffering 清掉，起播的加载提示会闪一下消失、然后黑屏等首帧。
                 // 真正停止（stopInternal/stopAndDismiss）各自会清 preparing/buffering。
-                Player.STATE_IDLE -> _state.update { it.copy(playing = false) }
+                Player.STATE_IDLE -> {
+                    clearBufferingHint()
+                    _state.update { it.copy(playing = false) }
+                }
             }
         }
 
@@ -1805,7 +1945,13 @@ object Playback {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             // 只同步 playing。isPlaying=true 只表示「playWhenReady 且已开始播放」，
             // 不代表首帧已渲染，不能据此撤转圈。转圈统一由首帧/READY-兜底/错误来收。
-            _state.update { it.copy(playing = isPlaying) }
+            //
+            // seek 期间 isPlaying 会短暂 false（目标位置的数据还没回来），直接照抄会让
+            // 暂停/播放图标在快进时来回跳。用 playWhenReady 兜底：只要用户没有主动暂停、
+            // 也没播完，就保持「正在播放」这一态。
+            val p = player
+            val held = p != null && p.playWhenReady && p.playbackState != Player.STATE_ENDED
+            _state.update { it.copy(playing = isPlaying || held) }
         }
 
         override fun onRenderedFirstFrame() {
@@ -1813,6 +1959,7 @@ object Playback {
             // 之前用 STATE_READY 撤圈，而 READY 与首帧的先后在不同视频/网络下会翻转；
             // READY 先到时就会出现「转圈没了、画面还没出」的空窗。
             firstFrameShown = true
+            clearBufferingHint()
             _state.update { it.copy(buffering = false, preparing = false) }
             captureThumbnail()
         }
@@ -1824,9 +1971,17 @@ object Playback {
                     videoHeight = videoSize.height,
                 )
             }
+            // 把真实分辨率记进缩略图缓存：网络视频列目录拿不到宽高，
+            // 信息页/详情弹窗此前一直显示「未知」。这份缓存落盘，杀进程后仍有效。
+            _state.value.item?.let { item ->
+                Thumbnails.rememberSize(app, item, videoSize.width, videoSize.height)
+            }
+            // 宽高比更新会改变比例框的测量结果，跟容器尺寸变化同样需要重测一次
+            requestVideoRelayout()
         }
 
         override fun onPlayerError(error: PlaybackException) {
+            clearBufferingHint()
             Log.w(TAG, "onPlayerError: code=${error.errorCode} ${error.message}")
             val item = _state.value.item
             // 本地文件：换下一种数据源策略再试

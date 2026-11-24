@@ -94,9 +94,6 @@ class MainActivity : FragmentActivity() {
     private fun registerPipReceiver() {
         val filter = IntentFilter().apply {
             addAction(PIP_TOGGLE)
-            addAction(PIP_EXPAND)
-            addAction(PIP_PREV)
-            addAction(PIP_NEXT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(pipReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -111,27 +108,26 @@ class MainActivity : FragmentActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 PIP_TOGGLE -> Playback.togglePlay()
-                PIP_PREV -> Playback.previous()
-                PIP_NEXT -> Playback.next()
-                PIP_EXPAND -> {
-                    // 回到全屏播放页：把任务切回前台并发出打开播放页信号
-                    Playback.requestOpenPlayer()
-                    runCatching {
-                        val manager = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-                        manager?.moveTaskToFront(taskId, 0)
-                    }
-                }
             }
         }
     }
 
-    /** 构造带上一个 / 播放暂停 / 下一个的画中画参数。调用方需自行保证已在 API 26+ */
+    /**
+     * 构造画中画参数。调用方需自行保证已在 API 26+。
+     *
+     * [autoEnter] 只给 `syncAutoEnterPip` 用：手动点「小窗播放」进的也传 false，
+     * 否则本次进小窗后参数会一直留着自动进入的许可，之后从任意页面按 Home
+     * 系统都会把小窗拉出来。
+     */
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
-    fun buildPipParams(ratio: Rational): PictureInPictureParams {
+    fun buildPipParams(ratio: Rational, autoEnter: Boolean = false): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
             .setAspectRatio(ratio)
             .setActions(pipActions(this))
-        // 系统小窗自带「展开」入口，不再添加自定义全屏按钮，避免两个放大按钮重叠冲突
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(autoEnter)
+            builder.setSeamlessResizeEnabled(true)
+        }
         return builder.build()
     }
 
@@ -183,18 +179,14 @@ class MainActivity : FragmentActivity() {
         const val EXTRA_OPEN_PLAYER = "com.yaoahos.mypureplayer.extra.OPEN_PLAYER"
         private const val REQ_PERMISSION = 1001
         private const val PIP_TOGGLE = "com.yaoahos.mypureplayer.pip.TOGGLE"
-        private const val PIP_EXPAND = "com.yaoahos.mypureplayer.pip.EXPAND"
-        private const val PIP_PREV = "com.yaoahos.mypureplayer.pip.PREV"
-        private const val PIP_NEXT = "com.yaoahos.mypureplayer.pip.NEXT"
         /** 保护 PIP 广播的自定义签名权限（见 AndroidManifest.xml） */
         private const val PIP_PERMISSION = "${BuildConfig.APPLICATION_ID}.permission.PIP_CONTROL"
         private var permissionCallback: ((Boolean) -> Unit)? = null
 
         /**
-         * 小窗控制条：上一个 / 播放暂停 / 下一个。
+         * 小窗控制条：只保留播放/暂停。
          * 进入小窗与状态刷新共用这一份，避免两处按钮数量或图标不一致。
-         * 队列边界（第一集没有上一个、最后一集没有下一个）用 enabled=false 置灰，
-         * 而不是隐藏——系统控制槽位固定，隐藏会让按钮在切歌时跳位。
+         * 用户要求小窗只保留最基本操作：上一个、下一个、放大都回到全屏播放页使用。
          */
         @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
         private fun pipActions(activity: Activity): List<RemoteAction> {
@@ -203,14 +195,6 @@ class MainActivity : FragmentActivity() {
             fun pi(action: String, requestCode: Int) =
                 PendingIntent.getBroadcast(activity, requestCode, Intent(action).setPackage(activity.packageName), flags)
 
-            val hasPrev = state.queueIndex > 0
-            val hasNext = state.queueIndex >= 0 && state.queueIndex < state.queueSize - 1
-
-            val prev = RemoteAction(
-                Icon.createWithResource(activity, R.drawable.ic_pip_prev),
-                "上一个", "播放上一个",
-                pi(PIP_PREV, 2),
-            ).apply { isEnabled = hasPrev }
             val playing = state.playing
             val toggle = RemoteAction(
                 Icon.createWithResource(activity, if (playing) R.drawable.ic_pip_pause else R.drawable.ic_pip_play),
@@ -218,12 +202,7 @@ class MainActivity : FragmentActivity() {
                 if (playing) "暂停播放" else "继续播放",
                 pi(PIP_TOGGLE, 1),
             )
-            val next = RemoteAction(
-                Icon.createWithResource(activity, R.drawable.ic_pip_next),
-                "下一个", "播放下一个",
-                pi(PIP_NEXT, 3),
-            ).apply { isEnabled = hasNext }
-            return listOf(prev, toggle, next)
+            return listOf(toggle)
         }
 
         /** 让小窗里的图标与置灰状态随播放状态刷新（播放状态变化时在 PlayerScreen 调用） */
@@ -236,11 +215,37 @@ class MainActivity : FragmentActivity() {
             } else {
                 Rational(16, 9)
             }
-            val params = PictureInPictureParams.Builder()
-                .setAspectRatio(ratio)
-                .setActions(pipActions(activity))
-                .build()
+            val params = (activity as? MainActivity)?.buildPipParams(ratio)
+                ?: PictureInPictureParams.Builder().setAspectRatio(ratio).build()
             runCatching { activity.setPictureInPictureParams(params) }
+        }
+
+        /**
+         * 按当前真实状态写入「是否允许系统自动进小窗」。
+         *
+         * 必须四个条件同时成立：设置里允许、播放页正显示在前台、视频真的在播、
+         * 既不是后台音频也不已经在小窗里。其余情况一律写 false。
+         *
+         * 参数是持久生效的：之前只要起播过一次就把 autoEnter 写成 true 再没人改，
+         * 于是退回列表、暂停、甚至换到设置页之后按 Home，系统照样进小窗，
+         * 小窗里显示的甚至是列表页 —— 就是用户说的「软件内也会画中画」。
+         */
+        fun syncAutoEnterPip(activity: Activity?) {
+            val main = activity as? MainActivity ?: return
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+            val state = Playback.state.value
+            val armed = Playback.settings.pipOnHome &&
+                Playback.playerScreenVisible &&
+                state.item != null &&
+                state.playing &&
+                !state.backgroundAudio &&
+                !Playback.pictureInPicture
+            val ratio = if (state.videoWidth > 0 && state.videoHeight > 0) {
+                Rational(state.videoWidth, state.videoHeight)
+            } else {
+                Rational(16, 9)
+            }
+            runCatching { main.setPictureInPictureParams(main.buildPipParams(ratio, armed)) }
         }
 
         /**
@@ -266,10 +271,16 @@ class MainActivity : FragmentActivity() {
         window.decorView.postDelayed({ Playback.onScreenLeave() }, 150L)
     }
 
-    /** 播放中按 Home / 切任务时自动进入画中画 */
+    /**
+     * Android 12+ 用系统 auto-enter：只有真正切到桌面/其它应用才会进小窗，
+     * 播放页上叠其它软件的弹窗、权限框、悬浮层不会误触发（入口在 buildPipParams）。
+     * 旧系统没有 auto-enter，才在这里按 Home/切任务进小窗。
+     */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        ) return
         val state = Playback.state.value
         if (!Playback.settings.pipOnHome) return
         if (state.item == null || !state.playing || state.backgroundAudio || Playback.pictureInPicture) return
@@ -278,8 +289,7 @@ class MainActivity : FragmentActivity() {
         } else {
             Rational(16, 9)
         }
-        val params = buildPipParams(ratio)
-        runCatching { enterPictureInPictureMode(params) }
+        runCatching { enterPictureInPictureMode(buildPipParams(ratio)) }
     }
 
     override fun onPictureInPictureModeChanged(

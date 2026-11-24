@@ -408,6 +408,7 @@ private fun HistoryEntry.toStub(): VideoItem = VideoItem(
     width = width,
     height = height,
     dateModified = dateModified,
+    localPath = localPath,
 )
 
 /** 用媒体库里的当前条目补全历史记录里没有保存的详情字段 */
@@ -460,7 +461,11 @@ private fun resume(
 
             MediaSource.STREAM -> listOf(stub)
         }
-        val index = list.indexOfFirst { it.id == stub.id }.coerceAtLeast(0)
+        // 重新扫描后 MediaStore 行号可能变化，id 找不到时用真实路径再匹配一次，
+        // 否则会默默播成同目录的第一条（用户感知就是「点历史播错了/打不开」）
+        val index = list.indexOfFirst {
+            it.id == stub.id || (stub.localPath != null && it.localPath == stub.localPath)
+        }.coerceAtLeast(0)
         Playback.play(list, index, start)
         navController.navigate(Routes.PLAYER)
     }

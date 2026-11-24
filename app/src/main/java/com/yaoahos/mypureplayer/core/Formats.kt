@@ -58,29 +58,27 @@ object Formats {
         return if (idx >= 0) clean.substring(idx + 1) else clean
     }
 
-    /** 是否是同一部影片的字幕（同名或 "影片.chs.srt" 这类） */
+    /**
+     * 是否是同一部影片的字幕。
+     *
+     * 判定放宽为「从第一个字符开始的前缀匹配」：视频 `abcd.mp4` 与字幕
+     * `abcd123.srt` / `abcd.chs.srt` / `abcd_2.srt` 都算同名，而 `aabcd123.srt`
+     * 因为首字符就对不上，不算。以前要求「片名 + 分隔符」才算，导致
+     * `abcd123.srt` 这类「片名直接接序号」的字幕在列表里根本不出现。
+     */
     fun matchesVideo(videoName: String, subtitleName: String): Boolean {
         val v = stripExtension(videoName).lowercase(Locale.ROOT)
         val s = stripExtension(subtitleName).lowercase(Locale.ROOT)
-        if (s == v) return true
-        return s.startsWith("$v.") || s.startsWith("${v}_") || s.startsWith("${v}-")
+        if (v.isEmpty()) return false
+        return s.startsWith(v)
     }
 
     /**
-     * 严格同名：只有「片名.srt」或「片名.<语言标记>.srt」才算，
-     * 用于自动加载，避免把「片名_别人的字幕.srt」这类误挂上。
+     * 自动加载用的判定：与 [matchesVideo] 同一套前缀规则，避免出现
+     * 「字幕列表里看得到、却不会自动挂上」的不一致。
      */
-    fun matchesVideoStrict(videoName: String, subtitleName: String): Boolean {
-        val v = stripExtension(videoName).lowercase(Locale.ROOT)
-        val s = stripExtension(subtitleName).lowercase(Locale.ROOT)
-        if (s == v) return true
-        if (!s.startsWith("$v.")) return false
-        val tail = s.removePrefix("$v.").trim()
-        // 只认语言/地区标记（chs/chi/zh/en/简/繁 等）或 1~3 位数字序号
-        return tail.length <= 8 && (
-            tail.toIntOrNull() != null || tail.matches(Regex("[a-z]{2,8}|[\\u4e00-\\u9fa5]{1,4}"))
-            )
-    }
+    fun matchesVideoStrict(videoName: String, subtitleName: String): Boolean =
+        matchesVideo(videoName, subtitleName)
 
     /**
      * 候选字幕的优先级：完全同名 > 中文（chs / chi / zh） > 数字后缀（1 / 2 / 3） > 其它。

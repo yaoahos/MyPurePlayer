@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.DriveFileRenameOutline
 import androidx.compose.material.icons.rounded.Folder
@@ -118,6 +119,8 @@ fun LocalScreen(navController: NavHostController) {
     val scope = rememberCoroutineScope()
 
     val videos by Graph.local.videos.collectAsStateWithLifecycle()
+    // 长按操作里的「删除历史」要按当前选中的视频判断有没有记录，没有就置灰
+    val history by Graph.history.history.collectAsStateWithLifecycle()
     val scanning by Graph.local.scanning.collectAsStateWithLifecycle()
     val vaultConfig by Graph.vault.config.collectAsStateWithLifecycle()
     // 保险箱是否已解锁（数据密钥在内存里）。锁定状态下直接隐藏必然失败，
@@ -195,6 +198,10 @@ fun LocalScreen(navController: NavHostController) {
     var pendingPermissionOp by remember { mutableStateOf<(() -> Unit)?>(null) }
     var busyText by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<VideoItem?>(null) }
+    // 多选删除（含多选里的文件夹）：与单条一样先确认，不能因为「选了好几个」就跳过
+    var pendingMultiDelete by remember { mutableStateOf<List<VideoItem>?>(null) }
+    // 删除历史（批量）：只清观看记录，不动文件，同样要二次确认
+    var pendingHistoryDelete by remember { mutableStateOf<List<VideoItem>?>(null) }
     // 「加入列表」的目标由用户自己选
     var pendingAdd by remember { mutableStateOf<List<VideoItem>?>(null) }
 
@@ -298,6 +305,12 @@ fun LocalScreen(navController: NavHostController) {
     // v:/d: 前缀区分视频与文件夹，避免两者 id 恰好相同
     val selectedVideos = remember(videos, selection.ids) {
         videos.filter { selection.contains("v:${it.id}") }
+    }
+    val historyKeys = remember(history) {
+        history.mapTo(HashSet()) { it.videoId to it.source }
+    }
+    val hasHistory = remember(selectedVideos, historyKeys) {
+        selectedVideos.any { (it.id to it.source) in historyKeys }
     }
     val selectedGroups = remember(groups, selection.ids) {
         groups.filter { selection.contains("d:${it.key}") }
@@ -456,19 +469,26 @@ fun LocalScreen(navController: NavHostController) {
                                 soloVideo != null -> pendingDelete = soloVideo
                                 soloGroup != null -> pendingFolderDelete = soloGroup
                                 else -> {
-                                    // 多选直接删除，已真正执行，随即退出选择态
+                                    // 多选：同样先弹确认框，确认后才真正移入回收站
                                     val targets = selectedVideos + selectedGroups.flatMap { it.videos }
-                                    if (targets.isNotEmpty()) {
-                                        guarded {
-                                            scope.launch {
-                                                targets.forEach { runCatching { Graph.trash.moveToTrash(it) } }
-                                                Graph.forgetGone(targets)
-                                                Notice.success("已将 ${targets.size} 个视频移入回收站")
-                                            }
-                                        }
-                                    }
-                                    selection.exit()
+                                    if (targets.isNotEmpty()) pendingMultiDelete = targets
                                 }
+                            }
+                        },
+                    ) + listOfNotNull(
+                        // 只清观看记录，不动视频文件；选中项里没有任何历史时置灰。
+                        // 文件夹本身没有观看记录，只选中文件夹时这一项直接不出现，
+                        // 而不是摆一个永远点不动的灰按钮。
+                        if (selectedVideos.isEmpty()) {
+                            null
+                        } else {
+                            SelectionAction(
+                                Icons.Rounded.History,
+                                "删除历史",
+                                enabled = canAct && hasHistory,
+                            ) {
+                                val targets = selectedVideos
+                                if (targets.isNotEmpty()) pendingHistoryDelete = targets
                             }
                         },
                     ),
@@ -786,6 +806,45 @@ fun LocalScreen(navController: NavHostController) {
                 }
             },
             onDismiss = { pendingDelete = null },
+        )
+    }
+
+    pendingMultiDelete?.let { targets ->
+        ConfirmDialog(
+            title = "删除视频",
+            message = "已选中的 ${targets.size} 个视频将移入回收站，可以在「更多 → 回收站」恢复。",
+            confirmText = "移入回收站",
+            destructive = true,
+            onConfirm = {
+                pendingMultiDelete = null
+                selection.exit()
+                guarded {
+                    scope.launch {
+                        targets.forEach { runCatching { Graph.trash.moveToTrash(it) } }
+                        Graph.forgetGone(targets)
+                        Notice.success("已将 ${targets.size} 个视频移入回收站")
+                    }
+                }
+            },
+            onDismiss = { pendingMultiDelete = null },
+        )
+    }
+
+    pendingHistoryDelete?.let { targets ->
+        ConfirmDialog(
+            title = "删除观看记录",
+            message = "已选中的 ${targets.size} 个视频的观看记录将被删除，不会删除视频文件。",
+            confirmText = "删除",
+            destructive = true,
+            onConfirm = {
+                pendingHistoryDelete = null
+                scope.launch {
+                    val n = Graph.history.removeAll(targets.map { it.id })
+                    Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
+                }
+                selection.exit()
+            },
+            onDismiss = { pendingHistoryDelete = null },
         )
     }
 

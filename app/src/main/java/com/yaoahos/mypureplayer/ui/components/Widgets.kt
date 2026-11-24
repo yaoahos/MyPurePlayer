@@ -406,10 +406,14 @@ fun MediaSectionLabel(
 @Composable
 fun adaptiveMediaGridMinSize(): Dp {
     val widthDp = LocalConfiguration.current.screenWidthDp
+    // 大屏不再沿用手机的「最小列宽」：平板竖屏约 813dp 时若是 104dp，
+    // 会排成 7 列、单卡只有 90dp 左右，缩略图小到看不清。按屏幕档位放大单卡，
+    // 平板竖屏稳定在 5 列、横屏 6~7 列，视觉密度与手机竖屏（4 列）保持接近。
     return when {
-        widthDp >= 1100 -> 128.dp  // 大平板：约 7~8 列
-        widthDp >= 840 -> 124.dp   // 平板横屏 / 手机横屏：6 列
-        widthDp >= 480 -> 104.dp   // 小平板、折叠屏展开、分屏：5 列
+        widthDp >= 1280 -> 176.dp  // 大平板横屏：约 6~7 列
+        widthDp >= 1000 -> 156.dp  // 平板横屏：约 6 列
+        widthDp >= 700 -> 148.dp   // 平板竖屏：约 5 列
+        widthDp >= 480 -> 112.dp   // 小平板、折叠屏展开、分屏：约 4 列
         else -> 76.dp              // 手机竖屏：4 列
     }
 }
@@ -427,7 +431,8 @@ fun listRowMinSize(): Dp {
     return when {
         widthDp >= 1600 -> 560.dp  // 大平板横屏：约 3 列
         widthDp >= 1100 -> 520.dp  // 平板横屏：约 2 列
-        widthDp >= 840 -> 480.dp   // 平板竖屏：约 2 列
+        // 平板竖屏约 813dp：480dp 只能排 1 列，行会被拉得很宽；降到 380dp 得到 2 列。
+        widthDp >= 700 -> 380.dp   // 平板竖屏：约 2 列
         else -> 1_000.dp           // 手机：强制单列
     }
 }
@@ -538,7 +543,8 @@ fun VideoGridCard(
                     maxLines = metaMaxLines,
                     overflow = TextOverflow.Ellipsis,
                 )
-                val ratio = progress ?: watchProgress(item)
+                // 外部传入的固定进度优先；否则订阅历史，删记录后进度条自己会消失
+                val ratio = if (progress != null) progress else watchProgress(item)
                 if (ratio > 0f) {
                     Spacer(Modifier.height(3.dp))
                     LinearProgressIndicator(
@@ -637,9 +643,26 @@ fun mediaDuration(item: VideoItem): Long {
     return if (known > 0L) known else Graph.history.historyDuration(item.id, item.source)
 }
 
+/**
+ * 续播位置（毫秒）：订阅历史表，而不是读一次快照。
+ *
+ * 原来这里直接调 [Graph.history.resumePosition]，拿到的是「组合那一刻」的值。
+ * 删掉历史后历史表变了，但卡片没有订阅它，于是进度条一直留在原位，
+ * 必须手动下拉刷新触发重组才消失。
+ */
+@Composable
+fun rememberResumePosition(item: VideoItem): Long {
+    val entries by Graph.history.history.collectAsStateWithLifecycle()
+    return remember(entries, item.id, item.source) {
+        entries.firstOrNull { it.videoId == item.id && it.source == item.source }?.positionMs ?: 0L
+    }
+}
+
+/** 卡片进度条比例：位置与总时长都走可订阅的来源，历史增删后立即跟着变。 */
+@Composable
 private fun watchProgress(item: VideoItem): Float {
-    val total = mediaDuration(item)
-    val position = Graph.history.resumePosition(item.id, item.source)
+    val position = rememberResumePosition(item)
+    val total = rememberMediaDuration(item)
     return if (total > 0L && position > 0L) (position.toFloat() / total).coerceIn(0f, 1f) else 0f
 }
 

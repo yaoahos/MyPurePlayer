@@ -3,10 +3,13 @@ package com.yaoahos.mypureplayer.data
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -95,6 +98,19 @@ class ServerRepo(context: Context) {
     }
 
     fun byId(id: Long): SmbServer? = _servers.value.firstOrNull { it.id == id }
+
+    /**
+     * 按主机地址找服务器。
+     *
+     * 播放列表 / 历史里的 SMB 条目记的是「加入那一刻的 serverId」。服务器被删掉重建、
+     * 或配置来自另一台设备的备份时，id 对不上就取不到服务器，表现是「地址没变却
+     * 一直提示打不开」。host 是真正决定连到哪台机器的东西，用它兜底。
+     */
+    fun byHost(host: String): SmbServer? {
+        val h = host.trim().substringAfter("smb://").substringBefore('/').substringBefore(':')
+        if (h.isBlank()) return null
+        return _servers.value.firstOrNull { it.host.trim().substringBefore(':').equals(h, ignoreCase = true) }
+    }
 }
 
 /** 串流地址 */
@@ -116,7 +132,13 @@ class StreamRepo(context: Context) {
     }
 
     suspend fun add(name: String, url: String): StreamItem = rw.withLock {
-        val item = StreamItem(id = System.currentTimeMillis(), name = name, url = url)
+        // id 用毫秒时间戳：批量创建副本时同一毫秒内会连加几条，直接取 now 会撞号，
+        // 列表 key 重复会让 Compose 崩。这里保证严格大于现有最大值。
+        val nextId = maxOf(
+            System.currentTimeMillis(),
+            (_streams.value.maxOfOrNull { it.id } ?: 0L) + 1L,
+        )
+        val item = StreamItem(id = nextId, name = name, url = url)
         val stamped = _streams.value + item
         store.write(stamped)
         _streams.value = stamped
@@ -192,6 +214,52 @@ class HistoryRepo(private val context: Context) {
             loaded = false
             ensureLoadedLocked()
         }
+        migrateLocalPaths()
+    }
+
+    /** 历史路径补全的后台任务只跑一次（进程内） */
+    private val migrateScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
+    private var pathMigrated = false
+
+    /**
+     * 老版本历史没有 [HistoryEntry.localPath]：按 content:// 反查 MediaStore 的真实路径补上。
+     *
+     * 为什么要迁移：缩略图缓存与播放现在都以「真实路径」为稳定键，本地 content://
+     * 行号重新扫描后会变；不补路径，老记录就既没有缩略图、也没法按路径兜底播放。
+     * 放在后台做（300 条最多几百毫秒），绝不挡历史页首帧。
+     */
+    private fun migrateLocalPaths() {
+        if (pathMigrated) return
+        pathMigrated = true
+        migrateScope.launch {
+            // 整个迁移在锁内基于**当前**历史做：否则迁移期间刚写入的一条播放进度，
+            // 会被这里用旧快照覆盖掉（表现为「刚看完的那条历史消失」）。
+            rw.withLock {
+                val current = _history.value
+                if (current.none { it.source == MediaSource.LOCAL && it.localPath == null }) return@withLock
+                var changed = false
+                val next = current.map { entry ->
+                    if (entry.source != MediaSource.LOCAL || entry.localPath != null) return@map entry
+                    val path = runCatching {
+                        context.contentResolver.query(
+                            Uri.parse(entry.uri),
+                            arrayOf(MediaStore.Video.Media.DATA),
+                            null, null, null,
+                        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                    }.getOrNull()
+                    if (!path.isNullOrBlank()) {
+                        changed = true
+                        entry.copy(localPath = path)
+                    } else {
+                        entry
+                    }
+                }
+                if (!changed) return@withLock
+                store.write(next)
+                _history.value = next
+            }
+        }
     }
 
     /** 配置恢复：整体替换历史。保留原始 id / updatedAt，不走 record 的节流与 300 条上限 */
@@ -239,6 +307,7 @@ class HistoryRepo(private val context: Context) {
                 height = item.height,
                 folderName = item.folderName,
                 dateModified = item.dateModified,
+                localPath = item.localPath,
             )
             val next = (_history.value.filterNot { it.videoId == item.id && it.source == item.source } + entry)
                 .sortedByDescending { it.updatedAt }
@@ -246,6 +315,8 @@ class HistoryRepo(private val context: Context) {
             store.write(next)
             _history.value = next
         }
+        // 冷启动直接播放时历史由写路径自己载入，这里补一次老记录的路径迁移
+        migrateLocalPaths()
     }
 
     suspend fun remove(videoId: String) = rw.withLock {

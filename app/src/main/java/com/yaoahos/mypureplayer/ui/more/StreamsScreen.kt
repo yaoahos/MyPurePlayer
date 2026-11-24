@@ -1,9 +1,5 @@
 package com.yaoahos.mypureplayer.ui.more
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import androidx.compose.ui.platform.LocalContext
-
 import androidx.activity.compose.BackHandler
 
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -34,6 +30,7 @@ import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FileCopy
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Podcasts
@@ -70,9 +67,6 @@ import com.yaoahos.mypureplayer.data.StreamItem
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.playback.Playback
 import com.yaoahos.mypureplayer.ui.Routes
-import com.yaoahos.mypureplayer.ui.components.ActionDivider
-import com.yaoahos.mypureplayer.ui.components.ActionRow
-import com.yaoahos.mypureplayer.ui.components.AdaptiveSheet
 import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.EmptyState
 import com.yaoahos.mypureplayer.ui.components.FabInsets
@@ -104,7 +98,6 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StreamsScreen(navController: NavHostController) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val streams by Graph.streams.streams.collectAsStateWithLifecycle()
     // 编辑器：编辑时带目标，新建时为 null
@@ -174,18 +167,25 @@ fun StreamsScreen(navController: NavHostController) {
                         SelectionAction(Icons.Rounded.Info, "详情", enabled = canAct && soloStream != null) {
                             soloStream?.let { infoTarget = it }
                         },
-                        SelectionAction(Icons.Rounded.ContentCopy, "复制链接", enabled = canAct && soloStream != null) {
-                            soloStream?.let { s ->
-                                val cm = context.getSystemService(ClipboardManager::class.java)
-                                cm?.setPrimaryClip(ClipData.newPlainText("串流地址", s.url))
-                                Notice.success("已复制串流地址")
-                            }
-                        },
-                        // 编辑与删除都会改动保存的串流列表，收进「更多」
+                        // 编辑是高频操作，放在第三格；删除等危险操作仍在「更多」里
                         SelectionAction(Icons.Rounded.Edit, "编辑", enabled = canAct && soloStream != null) {
                             if (soloStream != null) { editorTarget = soloStream; editorOpen = true }
                             selection.exit()
                         },
+                        // 复制「整条地址条目」：名称加「-副本」，地址原样带走。
+                        // 用于同一地址配多份备注/多套参数（原来那个「复制链接」只把 URL 放剪贴板，
+                        // 与条目本身无关，已随本次调整去掉）。
+                        SelectionAction(Icons.Rounded.FileCopy, "创建副本", enabled = canAct) {
+                            val targets = selectedStreams.toList()
+                            scope.launch {
+                                targets.forEach { Graph.streams.add(name = "${it.name}-副本", url = it.url) }
+                                Notice.success(
+                                    if (targets.size == 1) "已创建副本" else "已创建 ${targets.size} 个副本",
+                                )
+                            }
+                            selection.exit()
+                        },
+                        // 删除：确认框负责二次确认
                         SelectionAction(Icons.Rounded.DeleteOutline, "删除", enabled = canAct, danger = true) {
                             // 只弹确认框；确认删除后才退出选择态，取消时保留选中项
                             pendingDelete = selectedStreams.toList()
@@ -371,68 +371,6 @@ private fun StreamRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-        }
-    }
-}
-
-/**
- * 串流动作面板。
- *
- * 菜单用词与全站一致：第一个永远是「播放」，危险操作放最后并用错误色。
- * 「详情」与本地视频、历史记录、回收站用的是同一个词。
- */
-@Composable
-private fun StreamActionSheet(
-    stream: StreamItem,
-    onDismiss: () -> Unit,
-    onPlay: () -> Unit,
-    onEdit: () -> Unit,
-    onInfo: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    AdaptiveSheet(onDismiss = onDismiss) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.secondaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Rounded.Podcasts,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-            }
-            Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                Text(
-                    stream.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    stream.url,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth()) {
-            ActionRow(Icons.Rounded.PlayArrow, "播放") { onDismiss(); onPlay() }
-            ActionRow(Icons.Rounded.Edit, "编辑") { onDismiss(); onEdit() }
-            ActionRow(Icons.Rounded.Info, "详情") { onDismiss(); onInfo() }
-            ActionDivider()
-            ActionRow(Icons.Rounded.DeleteOutline, "删除", destructive = true) {
-                onDismiss(); onDelete()
-            }
         }
     }
 }

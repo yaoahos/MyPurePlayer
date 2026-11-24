@@ -54,8 +54,11 @@ object Thumbnails {
      *
      * v1 时期解码器有 CSD/stride 缺陷，落盘的图可能是黑屏或花屏；文件名带版本号后，
      * 升级到新算法会自动绕过旧图，并顺手清掉它们（见 [ensureCacheVersion]）。
+     *
+     * v6：抽帧判据（黑场/白闪/发亮过曝/纯色）与续读时间点都改过。文件名不带版本的话，
+     * 以前存下的「发亮封面」会一直被命中，用户看到的仍是旧图 —— 改算法不升版本等于没改。
      */
-    private const val CACHE_VERSION = "v5"
+    private const val CACHE_VERSION = "v6"
 
     /** 缩略图「跑完但没图」时的自动重试次数上限 */
     private const val MAX_QUIET_RETRIES = 3
@@ -150,6 +153,15 @@ object Thumbnails {
     private val knownDurations = ConcurrentHashMap<String, Long>()
 
     /**
+     * 已知分辨率。
+     *
+     * 网络视频列目录只拿得到文件名/大小/时间，宽高永远是 0，信息页就显示「未知」。
+     * 播放器的 onVideoSizeChanged 与抽帧时的容器元数据都能拿到真实宽高，统一记在这里
+     * 并落盘 `.wh`：杀进程、重装后信息页仍能显示，而不是每次都靠再播一遍。
+     */
+    private val knownSizes = ConcurrentHashMap<String, IntArray>()
+
+    /**
      * 正在播放网络视频时暂停抽帧。
      *
      * 播放和抽帧原本共用 SMB 通道，一屏二十多张封面同时开工会让首帧和快进
@@ -238,6 +250,66 @@ object Thumbnails {
     private val durationFailed = ConcurrentHashMap.newKeySet<String>()
 
     fun knownDuration(id: String): Long = knownDurations[id] ?: 0L
+
+    /**
+     * 记下解析出的视频宽高。
+     *
+     * 两个来源都会调：播放器 [Playback] 的 onVideoSizeChanged（最准），
+     * 以及抽帧时 MediaMetadataRetriever 的 METADATA_KEY_VIDEO_WIDTH/HEIGHT。
+     * 值没变化就直接返回，避免播放中每次尺寸回调都写一次盘。
+     */
+    fun rememberSize(context: Context, item: VideoItem, width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        val old = knownSizes[item.id]
+        if (old != null && old[0] == width && old[1] == height) return
+        knownSizes[item.id] = intArrayOf(width, height)
+        workScope.launch {
+            runCatching {
+                val f = File(cacheDir(context), "${keyOf(item)}.wh")
+                f.parentFile?.mkdirs()
+                f.writeText("$width $height")
+            }
+        }
+    }
+
+    /** 取已知分辨率：条目自带 > 内存 > 磁盘；都没有返回 null（信息页显示「未知」） */
+    fun cachedSize(context: Context, item: VideoItem): Pair<Int, Int>? {
+        if (item.width > 0 && item.height > 0) return item.width to item.height
+        knownSizes[item.id]?.let { return it[0] to it[1] }
+        val f = File(cacheDir(context), "${keyOf(item)}.wh")
+        if (!f.exists()) return null
+        val nums = runCatching { f.readText().trim().split(' ').map { it.toInt() } }.getOrNull() ?: return null
+        if (nums.size != 2 || nums[0] <= 0 || nums[1] <= 0) return null
+        knownSizes[item.id] = intArrayOf(nums[0], nums[1])
+        return nums[0] to nums[1]
+    }
+
+    /**
+     * 重新进入目录时给这些视频一次重试机会。
+     *
+     * 旧逻辑对「连续两次取不出画面」落盘 `.nothumb3` 并压进 [unsupported]，有效期一周。
+     * 用户第一次进目录时网络抖动/超时被判死，之后再进同一个文件夹也不会重试 ——
+     * 表现就是「第一次没生成，以后永远没有缩略图」。进目录时把这一批的判定清掉，
+     * 每进一次最多重跑一次，失败也不会滚雪球（并发与超时仍受原策略约束）。
+     */
+    fun allowRetry(context: Context, items: Collection<VideoItem>) {
+        var cleared = false
+        items.forEach { item ->
+            if (item.source != MediaSource.SMB) return@forEach
+            val key = keyOf(item)
+            var had = false
+            if (unsupported.remove(item.id)) had = true
+            if (failCounts.remove(key) != null) had = true
+            if (retryCounts.remove(key) != null) had = true
+            if (deepFallbackUsed.remove(item.id)) had = true
+            if (durationFailed.remove(item.id)) had = true
+            if (runCatching { noThumbMark(context, item).delete() }.getOrDefault(false)) had = true
+            if (had) cleared = true
+        }
+        // 卡片一旦因为「已判死」停在图标上，就不会再自己请求；这里主动发一次版本号，
+        // 让还空着的卡片重新取图（只在本目录确实有失败标记时触发，避免每次进目录都重排整屏）。
+        if (cleared) _thumbVersion.value = _thumbVersion.value + 1
+    }
 
     fun displayDuration(item: VideoItem): Long =
         if (item.durationMs > 0L) item.durationMs else knownDuration(item.id)
@@ -593,7 +665,7 @@ object Thumbnails {
                                         //     这正是「有缩略图但全黑」的来源。
                                         // 每次补 2.5MB，最多补三次（合计约 11MB）。
                                         var extra = 0
-                                        while ((frame == null || isTooDark(frame)) && extra < 3) {
+                                        while ((frame == null || isUnusableFrame(frame)) && extra < 3) {
                                             extra++
                                             if (!probe.extend(2_500_000L)) break
                                             runCatching { frame?.recycle() }
@@ -604,9 +676,11 @@ object Thumbnails {
                                                 maxWidth,
                                                 nearStart = true,
                                                 timeoutMs = 3_500L,
+                                                // 每补一次数据，取帧时间点整体往后推一档
+                                                extraDepth = extra,
                                             )
                                         }
-                                        val usable = frame?.takeIf { !isTooDark(it) }
+                                        val usable = frame?.takeIf { !isUnusableFrame(it) }
                                         if (usable != null) {
                                             Log.d(
                                                 TAG,
@@ -666,7 +740,10 @@ object Thumbnails {
                             val r = MediaMetadataRetriever().also { retriever = it }
                             val parsed = Uri.parse(item.uri)
                             val tl = System.currentTimeMillis()
-                            val path = localFilePath(context, parsed)
+                            // 条目自带真实路径时直接用：content:// 行号变化后文件本身仍可读，
+                            // 旧实现只认 content URI，行号一换就再也抽不出帧。
+                            val path = item.localPath?.takeIf { File(it).canRead() }
+                                ?: localFilePath(context, parsed)
                             if (path != null) {
                                 r.setDataSource(path)
                             } else {
@@ -777,10 +854,26 @@ object Thumbnails {
         maxWidth: Int,
         nearStart: Boolean = false,
         fewProbes: Boolean = false,
+        extraDepth: Int = 0,
     ): Bitmap? {
         val durationMs = runCatching {
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
         }.getOrNull() ?: 0L
+        // 抽帧时顺手把容器里的真实宽高记下来：网络视频的信息页就靠这份数据，
+        // 不必等用户先播一遍（播放页的 onVideoSizeChanged 也会写同一份缓存）。
+        val px = runCatching {
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        }.getOrDefault(0)
+        val py = runCatching {
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        }.getOrDefault(0)
+        // 部分手机把旋转信息单独给出，宽高按显示方向交换后再记
+        val rotation = runCatching {
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        }.getOrDefault(0)
+        if (px > 0 && py > 0) {
+            if (rotation == 90 || rotation == 270) rememberSize(context, item, py, px) else rememberSize(context, item, px, py)
+        }
         if (durationMs > 0L && knownDurations.put(item.id, durationMs) != durationMs) {
             _durationVersion.value += 1
             // 时长同时落盘：杀进程/重装后列表不必等抽帧完成就能显示时长、按时长排序
@@ -791,7 +884,7 @@ object Thumbnails {
             }
         }
 
-        return bitmapFromRetriever(retriever, maxWidth, nearStart, fewProbes)
+        return bitmapFromRetriever(retriever, maxWidth, nearStart, fewProbes, extraDepth)
     }
 
     /**
@@ -993,13 +1086,14 @@ object Thumbnails {
         maxWidth: Int,
         nearStart: Boolean = false,
         timeoutMs: Long = 6_000L,
+        extraDepth: Int = 0,
     ): Bitmap? = withContext(Dispatchers.IO) {
         val holder = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
         val worker = Thread({
             val retriever = MediaMetadataRetriever()
             try {
                 retriever.setDataSource(file.absolutePath)
-                holder.set(frameFrom(context, retriever, item, maxWidth, nearStart))
+                holder.set(frameFrom(context, retriever, item, maxWidth, nearStart, extraDepth = extraDepth))
             } catch (t: Throwable) {
                 Log.d(TAG, "片头抽帧异常：${t.javaClass.simpleName} ${t.message}")
             } finally {
@@ -1074,6 +1168,7 @@ object Thumbnails {
         // 网络源每多试一个时间点就要多一次 seek + 续读（实测每集 3MB 左右），
         // 只留「片长 10%」和「第一帧」两次，把失败尝试的流量省下来。
         fewProbes: Boolean = false,
+        extraDepth: Int = 0,
     ): Bitmap? {
         val durationMs = runCatching {
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
@@ -1087,27 +1182,46 @@ object Thumbnails {
         val times = when {
             // 片头文件是被截断的前若干 MB：只能取片头几秒的画面，
             // 按「片长 10%」去取必然落在文件之外，所有时间点都会失败。
-            // 片头文件是被截断的前若干 MB：只能取片头几秒的画面。
             // 顺序很关键：先试 3 秒、5 秒（越过黑场与台标），最后才退回第一帧，
             // 避免片头黑场被当成「取到了画面」而直接返回一张黑图。
-            nearStart -> longArrayOf(9_000_000L, 5_000_000L, 2_000_000L, 0L)
+            //
+            // extraDepth > 0 表示这是「前面都不合格、已往后补过数据」的轮次：
+            // 补进去的是后续视频块，时间点也要跟着往后走，否则每轮都在重试同一批
+            // 片头帧（旧实现就是这样：白闪/发亮的片头永远换不掉）。
+            nearStart -> if (extraDepth <= 0) {
+                longArrayOf(9_000_000L, 5_000_000L, 2_000_000L, 0L)
+            } else {
+                longArrayOf(15_000_000L, 25_000_000L, 40_000_000L, 60_000_000L, 9_000_000L, 5_000_000L)
+            }
             // 完整数据源：先取片长 10%（3~30 秒），片头黑场时再往后跳，最后才退回第一帧
-            fewProbes -> longArrayOf(primaryUs, 8_000_000L, 0L)
-            else -> longArrayOf(primaryUs, primaryUs + 20_000_000L, 1_500_000L, -1L)
+            fewProbes -> longArrayOf(primaryUs, primaryUs + 30_000_000L, primaryUs + 90_000_000L, 6_000_000L, 0L)
+            // 多给两个「往后跳」的点：10% 处可能正好是转场/淡入淡出的纯色帧，
+            // 这时与它相距 20 秒、40 秒的位置大概率已经进入正片。
+            else -> longArrayOf(primaryUs, primaryUs + 20_000_000L, primaryUs + 40_000_000L, 1_500_000L, -1L)
         }
         var raw: Bitmap? = null
-        var darkest: Bitmap? = null
+        // 全都不合格时的兜底：以前留「第一张不合格帧」（常是黑场），
+        // 现在留「信息量最大」的那张 —— 转场中间的低对比帧也比纯黑能看。
+        var fallback: Bitmap? = null
+        var fallbackScore = Int.MIN_VALUE
         for (timeUs in times) {
             val frame = runCatching {
                 retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             }.getOrNull() ?: continue
-            if (!isTooDark(frame)) {
+            val score = frameScore(frame)
+            if (score >= 0) {
                 raw = frame
                 break
             }
-            if (darkest == null) darkest = frame else frame.recycle()
+            if (score > fallbackScore) {
+                fallback?.recycle()
+                fallback = frame
+                fallbackScore = score
+            } else {
+                frame.recycle()
+            }
         }
-        if (raw == null) raw = darkest ?: runCatching { retriever.frameAtTime }.getOrNull()
+        if (raw == null) raw = fallback ?: runCatching { retriever.frameAtTime }.getOrNull()
         if (raw == null) {
             Log.w(TAG, "所有时间点取帧均失败")
             return null
@@ -1128,22 +1242,28 @@ object Thumbnails {
     }
 
     /**
-     * 纯黑场判定。
+     * 给一帧打分：负数表示「不适合当封面」，非负数是信息量（越大越有内容）。
      *
-     * 不能用「平均亮度」：字幕组的片头卡是黑底白字（比如画面中央一个大 A），
-     * 白字只占很小面积，平均亮度依然很低，会被误判成黑场 —— 结果整屏都退回图标，
-     * 反而比之前「有图但是黑底」更差。
-     * 这里改看「亮点占比」：亮度 > 40 的采样点不足 1% 才算黑场；
-     * 黑底白字的标题卡有 2%~15% 的亮点，能正常通过。
+     * 三类要在抽帧阶段就排除的画面：
+     *  1) 纯黑场 / 片头黑场 —— 不能用「平均亮度」判（黑底白字的标题卡平均亮度也低），
+     *     改看「亮点占比」：亮度 > 40 的采样点不足 1% 才算黑场；
+     *  2) 白闪 / 淡入淡出的白场 —— 转场最典型的「白色遮罩」，以前只判黑不判白，
+     *     于是被当成正常画面存成封面。这里要求 92% 以上采样点亮度 > 240 才算白场；
+     *  3) 近乎纯色的低信息帧（转场中段、渐变过渡）—— 用亮度方差判断，
+     *     方差低于 12 基本就是一块单色。
+     * 黑底白字 / 白底黑字的标题卡因为有大量反差像素，方差很大，能正常通过。
      */
-    private fun isTooDark(bitmap: Bitmap): Boolean {
+    private fun frameScore(bitmap: Bitmap): Int {
         val w = bitmap.width
         val h = bitmap.height
-        if (w <= 0 || h <= 0) return true
+        if (w <= 0 || h <= 0) return -1
         val stepX = (w / 32).coerceAtLeast(1)
         val stepY = (h / 32).coerceAtLeast(1)
         var bright = 0
+        var white = 0
         var total = 0
+        var sum = 0L
+        var sumSq = 0L
         var y = 0
         while (y < h) {
             var x = 0
@@ -1155,13 +1275,29 @@ object Thumbnails {
                         (p and 0xFF) * 114
                     ) / 1000
                 if (luma > 40) bright++
+                if (luma > 240) white++
+                sum += luma
+                sumSq += luma.toLong() * luma
                 total++
                 x += stepX
             }
             y += stepY
         }
-        return total == 0 || bright * 100 < total
+        if (total == 0) return -1
+        if (bright * 100 < total) return -1
+        if (white * 100 >= total * 78) return -1
+        val mean = (sum / total).toInt()
+        val variance = (sumSq / total - mean.toLong() * mean).toInt()
+        if (variance < 120) return -1
+        // 发亮的过曝帧：整体亮度很高、几乎没有细节（白闪前后、淡入淡出的白场）。
+        // 只判「纯白」不够 —— 淡出到一半的画面只有七成像素是纯白，依然刺眼。
+        // 有细节的亮场景（雪景、白墙+字幕）方差远大于 2000，不会被误杀。
+        if (mean >= 200 && variance < 2_000) return -1
+        return variance
     }
+
+    /** 这一帧是否不能当封面（黑场 / 白闪 / 纯色） */
+    private fun isUnusableFrame(bitmap: Bitmap): Boolean = frameScore(bitmap) < 0
 
     /** 抽样平均亮度（0~255），16×16 个采样点，够用且几乎不耗时 */
     private fun averageLuma(bitmap: Bitmap): Int {
@@ -1332,7 +1468,7 @@ object Thumbnails {
         val files = dir.listFiles()
             ?.filter {
                 it.isFile && (it.name.endsWith(".jpg") || it.name.endsWith(".dur") ||
-                    it.name.startsWith("probe-"))
+                    it.name.endsWith(".wh") || it.name.startsWith("probe-"))
             }
             ?: return
         var total = files.sumOf { it.length() }
@@ -1438,7 +1574,7 @@ object Thumbnails {
 
     fun diskUsage(context: Context): Long =
         cacheDir(context).listFiles()
-            ?.filter { it.name.endsWith(".jpg") || it.name.endsWith(".dur") }
+            ?.filter { it.name.endsWith(".jpg") || it.name.endsWith(".dur") || it.name.endsWith(".wh") }
             ?.sumOf { it.length() } ?: 0L
 
     fun clear(context: Context) {
@@ -1446,6 +1582,7 @@ object Thumbnails {
         // 内存里的「已知时长 / 取不出帧」也要一起清掉，否则点了清除缓存，
         // 这些视频仍然不会再尝试一次，看着就像清除没生效
         knownDurations.clear()
+        knownSizes.clear()
         unsupported.clear()
         failCounts.clear()
         retryCounts.clear()
@@ -1458,10 +1595,12 @@ object Thumbnails {
     }
 
     private fun keyOf(item: VideoItem): String {
-        // 只用稳定的 item.id（SMB 是 smb:// 路径，本地是 content:// Uri）。
-        // 之前拼 size/date：历史「继续观看」构造的 stub 丢失这两个字段，导致 mark 与 check
-        // 的 key 永远不一致，已播放视频被误判为未播放而不生成缩略图。
-        val digest = MessageDigest.getInstance("MD5").digest(item.id.toByteArray())
+        // SMB 用 smb:// 路径（本身稳定）；本地优先用真实文件路径。
+        // 本地 id 是 MediaStore 的 content:// 行号，重新扫描、移动文件或清理媒体库后
+        // 会变化 —— 行号一变，缩略图缓存与历史播放同时失效，用户看到的就是
+        // 「过段时间记录既不能播、也没有图」。路径不随行号变化。
+        val stable = item.localPath?.takeIf { it.isNotBlank() } ?: item.id
+        val digest = MessageDigest.getInstance("MD5").digest(stable.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }
     }
 }

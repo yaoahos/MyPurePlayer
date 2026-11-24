@@ -70,7 +70,22 @@ data class SmbServer(
                 "smb://${parsed.host}/"
             }
         }
-    val displayHost: String get() = if (share.isNotBlank()) "$host/$share" else host
+    /**
+     * 列表副标题用的地址。
+     *
+     * 带 `smb://`：与「视频详情」里的位置、播放页的串流地址保持同一种写法 ——
+     * 全站要么都带协议、要么都不带，不能一处带一处不带。
+     */
+    val displayHost: String
+        get() {
+            val parsed = SmbInput.parse(host)
+            val cleanShare = (share.ifBlank { parsed.share }).trim().trim('/')
+            return if (cleanShare.isNotBlank()) {
+                "smb://${parsed.host}/$cleanShare"
+            } else {
+                "smb://${parsed.host}"
+            }
+        }
 }
 
 /** 串流地址 */
@@ -101,6 +116,14 @@ data class HistoryEntry(
     val height: Int = 0,
     val folderName: String = "",
     val dateModified: Long = 0L,
+    /**
+     * 本地文件的真实路径。
+     *
+     * [videoId] / [uri] 用的是 MediaStore 的 content:// 行号，重新扫描、移动文件或
+     * 清理媒体库后行号可能变化 —— 历史里就会出现「点了打不开、缩略图也没了」。
+     * 路径稳定得多：播放、抽帧、缩略图缓存都优先用它兜底。
+     */
+    val localPath: String? = null,
 )
 
 /** 播放器 UI 状态 */
