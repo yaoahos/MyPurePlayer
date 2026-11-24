@@ -10,11 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * 启动阶段需要给用户看的更新提示。
- *
- * 分两类：
- * - [Kind.NEW_VERSION]：检查到服务器上有更新，带下载入口；
- * - [Kind.WHATS_NEW]：本地版本刚升级，展示「本次更新内容」，纯说明。
+ * 启动阶段需要给用户看的更新提示：检查到服务器上有新版本时弹出，带下载入口。
  *
  * 放在 StateFlow 里而不是直接弹对话框：Application 没有窗口，
  * 只能把结果交给界面根部（[com.yaoahos.mypureplayer.ui.components.UpdatePromptHost]）统一展示。
@@ -31,13 +27,10 @@ data class UpdatePromptData(
     /** 安装包大小（字节），0 表示未知 */
     val size: Long = 0L,
 ) {
-    enum class Kind { NEW_VERSION, WHATS_NEW }
+    enum class Kind { NEW_VERSION }
 }
 
 object UpdatePrompt {
-
-    private const val PREFS = "update_prompt"
-    private const val KEY_LAST_VERSION = "last_installed_version"
 
     private val _state = MutableStateFlow<UpdatePromptData?>(null)
     val state: StateFlow<UpdatePromptData?> = _state.asStateFlow()
@@ -152,27 +145,4 @@ object UpdatePrompt {
         )
     }
 
-    /**
-     * 升级后首次启动展示「本次更新内容」，每个版本只弹一次。
-     *
-     * 首次安装不弹：只记录版本号，等下次真正升级时才有「更新内容」的意义。
-     */
-    fun maybeShowWhatsNew(context: Context, currentVersion: String, notes: List<ReleaseNote>) {
-        if (_state.value != null) return
-        // debug 包的 versionName 带 "-debug" 后缀，更新日志里只写 1.1.0，比较前先去掉后缀
-        val current = currentVersion.substringBefore('-')
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val lastRaw = prefs.getString(KEY_LAST_VERSION, null)
-        prefs.edit().putString(KEY_LAST_VERSION, current).apply()
-        val last = lastRaw?.substringBefore('-')
-        if (last.isNullOrBlank() || last == current) return
-
-        val entry = notes.firstOrNull { it.version == current } ?: return
-        _state.value = UpdatePromptData(
-            kind = UpdatePromptData.Kind.WHATS_NEW,
-            version = entry.version,
-            current = current,
-            notes = entry.notes.joinToString("\n") { "· $it" },
-        )
-    }
 }

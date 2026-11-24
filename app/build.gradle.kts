@@ -22,7 +22,7 @@ val keystoreProperties = Properties().apply {
 
 // 产物命名与版本号共用同一份常量：AGP 9 移除了旧 Variant API，
 // 拿不到 variant.versionName，这里自己持有一份，避免两处不同步。
-val appVersionName = "1.0.1"
+val appVersionName = "1.0.2"
 
 android {
     namespace = "com.yaoahos.mypureplayer"
@@ -36,11 +36,11 @@ android {
         applicationId = "com.yaoahos.mypureplayer"
         minSdk = 24
         targetSdk = 36
-        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2）。每次真机验证都要覆盖安装，
+        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3）。每次真机验证都要覆盖安装，
         // MIUI 不允许 versionCode 不高于已装版本的包降级/同版本覆盖（会要求先卸载），
         // 所以测试包允许临时抬高：./gradlew assembleRelease -PtestVersionCode=1001
         // 不传这个参数时仍是正式版本号，打出来的包可直接发布。
-        versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 2
+        versionCode = (project.findProperty("testVersionCode") as String?)?.toIntOrNull() ?: 3
         versionName = appVersionName
     }
 

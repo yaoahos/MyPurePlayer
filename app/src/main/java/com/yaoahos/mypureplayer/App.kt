@@ -85,31 +85,27 @@ class App : Application() {
     /**
      * 冷启动自动检查更新。
      *
-     * 两件事：
-     * 1. 版本号变了（刚升级上来）→ 弹一次「本次更新内容」，数据取自内置更新日志；
-     * 2. 开关打开且距上次检查超过 24 小时 → 问一次 GitHub，有新版本就弹窗带上发布说明。
+     * 开关打开且距上次**成功**检查超过 6 小时 → 问一次 GitHub，有新版本就弹窗带上发布说明。
+     * 只在请求成功后写回时间：网络失败不占用节流窗口，下次启动会重试，
+     * 避免发布当天老用户因为一次超时要等满 24 小时才收到提示。
+     * 升级后的「本次更新内容」不再弹窗，版本说明统一放在关于页的更新日志里。
      *
      * 检查本身全在后台线程，失败静默，不打扰使用。
      */
     private fun autoCheckUpdate() {
         bootScope.launch {
-            val current = BuildConfig.VERSION_NAME
-            // 升级后的更新日志读本地资源，和设备是否联网无关，可以立即弹
-            runCatching {
-                UpdatePrompt.maybeShowWhatsNew(this@App, current, UpdateLog.load(this@App))
-            }
-
             // 等首帧渲染完再联网，避免和媒体扫描、libVLC 初始化抢资源
             delay(2_000L)
             val settings = runCatching { Graph.settings.settings.first() }.getOrNull() ?: return@launch
             if (!settings.autoCheckUpdate) return@launch
             val now = System.currentTimeMillis()
-            if (now - settings.lastUpdateCheck < 24L * 60 * 60 * 1000) return@launch
+            if (now - settings.lastUpdateCheck < 6L * 60 * 60 * 1000) return@launch
 
-            // 先写回时间，避免网络失败时每次启动都重试
-            runCatching { Graph.settings.setLastUpdateCheck(now) }
+            val current = BuildConfig.VERSION_NAME
             val result = UpdateChecker.check(UpdateChecker.DEFAULT_REPO, current).getOrNull()
                 ?: return@launch
+            // 请求成功才写回；失败保留原时间戳，下次启动重试
+            runCatching { Graph.settings.setLastUpdateCheck(now) }
             if (result.hasUpdate) {
                 UpdatePrompt.showNewVersion(result, UpdateLog.load(this@App))
             }

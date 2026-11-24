@@ -104,7 +104,7 @@ internal fun formatBytes(bytes: Long): String {
 }
 
 /**
- * 更新提示对话框：发现新版本 / 本次更新内容共用一套版式。
+ * 发现新版本的更新提示对话框。
  *
  * 与 SafePassword 对齐的三处：
  *  1) 更新日志先清洗再列表化（见 [conciseNotes]），不再原样贴 Markdown；
@@ -391,20 +391,6 @@ fun UpdatePromptHost() {
                 }
             },
             errorText = download?.error,
-        )
-
-        UpdatePromptData.Kind.WHATS_NEW -> UpdateAvailableDialog(
-            title = "已更新到 ${data.version}",
-            versionLine = "以下是本次更新的主要内容",
-            notes = data.notes,
-            sizeBytes = 0L,
-            downloading = false,
-            progress = 0,
-            onDismiss = { UpdatePrompt.dismiss() },
-            confirmLabel = "知道了",
-            onConfirm = { UpdatePrompt.dismiss() },
-            dismissLabel = "关闭",
-            errorText = null,
         )
     }
 }
