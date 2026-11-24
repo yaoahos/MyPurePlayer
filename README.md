@@ -4,10 +4,10 @@ MyPurePlayer 是一个只做视频播放的 Android 客户端，使用 Kotlin + 
 
 - 项目名：`MyPurePlayer`
 - 包名：`com.yaoahos.mypureplayer`
-- 当前版本：`1.0.3`（versionCode 4）
+- 当前版本：`1.0.4`（versionCode 5）
 - 最低系统：Android 7.0（API 24）
 - 编译 SDK：Android SDK Platform 37；目标 SDK：Android 16（API 36）
-- 发布资产：`MyPurePlayer-1.0.3-release.apk`
+- 发布资产：`MyPurePlayer-1.0.4-release.apk`
 - 发布下载：[Releases](https://github.com/yaoahos/MyPurePlayer/releases)
 
 > 本项目为独立开发的播放器，与任何品牌厂商均无关联。
@@ -203,6 +203,15 @@ FFmpeg 以 **LGPL-2.1+** 编译（configure 未启用 `--enable-gpl`，也未引
 ---
 
 ## 八、版本记录
+
+**2026/11/25 · 1.0.4**
+
+- 优化：云端备份列表以设备名称作标题，界面不再出现「短码」字样
+- 优化：播放失败的提示精简为一句，不再展开冗长的原因说明
+- 变更：视频已不存在时不再进入播放页，改为在页面顶部提示
+- 修复：历史记录与播放列表中的网络条目可能打开到其他共享目录，匹配不到时提示视频不存在
+- 修复：从历史记录或本地列表进入时可能播放成同目录的第一条视频
+- 修复：新版本发布后长时间收不到更新提示
 
 **2026/11/25 · 1.0.3**
 
