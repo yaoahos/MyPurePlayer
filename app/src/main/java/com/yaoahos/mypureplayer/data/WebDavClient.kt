@@ -1,6 +1,7 @@
 package com.yaoahos.mypureplayer.data
 
 import android.util.Base64
+import com.yaoahos.mypureplayer.BuildConfig
 import org.w3c.dom.Element
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -231,7 +232,7 @@ object WebDavClient {
             head.append("Host: ").append(host)
                 .append(if (port == 80 || port == 443) "" else ":$port").append("\r\n")
             head.append("Connection: close\r\n")
-            head.append("User-Agent: MyPurePlayer/1.0\r\n")
+            head.append("User-Agent: MyPurePlayer/${BuildConfig.VERSION_NAME}\r\n")
             if (username.isNotBlank()) {
                 val token = Base64.encodeToString(
                     "$username:$password".toByteArray(Charsets.UTF_8),

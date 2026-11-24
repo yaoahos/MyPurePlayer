@@ -4,10 +4,10 @@ MyPurePlayer 是一个只做视频播放的 Android 客户端，使用 Kotlin + 
 
 - 项目名：`MyPurePlayer`
 - 包名：`com.yaoahos.mypureplayer`
-- 当前版本：`1.0.1`（versionCode 2）
+- 当前版本：`1.0.2`（versionCode 3）
 - 最低系统：Android 7.0（API 24）
 - 编译 SDK：Android SDK Platform 37；目标 SDK：Android 16（API 36）
-- 发布资产：`MyPurePlayer-1.0.1-release.apk`
+- 发布资产：`MyPurePlayer-1.0.2-release.apk`
 - 发布下载：[Releases](https://github.com/yaoahos/MyPurePlayer/releases)
 
 > 本项目为独立开发的播放器，与任何品牌厂商均无关联。

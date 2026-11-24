@@ -9,6 +9,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import com.yaoahos.mypureplayer.BuildConfig
 import com.yaoahos.mypureplayer.data.SmbClient
 import com.yaoahos.mypureplayer.data.SmbRandomReader
 import com.yaoahos.mypureplayer.data.SmbServer
@@ -308,7 +309,7 @@ class SmbRoutingDataSource(private val context: Context) : BaseDataSource(false)
         .setAllowCrossProtocolRedirects(true)
         .setConnectTimeoutMs(15_000)
         .setReadTimeoutMs(20_000)
-        .setUserAgent("MyPurePlayer/1.0.1")
+        .setUserAgent("MyPurePlayer/${BuildConfig.VERSION_NAME}")
 
     override fun open(dataSpec: DataSpec): Long {
         val scheme = dataSpec.uri.scheme?.lowercase()
