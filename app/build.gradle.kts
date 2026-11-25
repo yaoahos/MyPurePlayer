@@ -22,7 +22,7 @@ val keystoreProperties = Properties().apply {
 
 // 产物命名与版本号共用同一份常量：AGP 9 移除了旧 Variant API，
 // 拿不到 variant.versionName，这里自己持有一份，避免两处不同步。
-val appVersionName = "1.0.4"
+val appVersionName = "1.0.5"
 
 android {
     namespace = "com.yaoahos.mypureplayer"
@@ -36,10 +36,10 @@ android {
         applicationId = "com.yaoahos.mypureplayer"
         minSdk = 24
         targetSdk = 36
-        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3，1.0.3 = 4，1.0.4 = 5）。
+        // 正式版本号与 versionName 对齐（1.0.0 = 1，1.0.1 = 2，1.0.2 = 3，1.0.3 = 4，1.0.4 = 5，1.0.5 = 6）。
         // 调试包是独立包名（.debug 后缀）、独立的应用，不需要抬高版本号来覆盖；
         // 需要拿真机验证新改动时直接 assembleDebug 即可，与正式版并存。
-        versionCode = 5
+        versionCode = 6
         versionName = appVersionName
         // 桌面名称：正式版用 app_name，debug 构建在 buildTypes 里换成「调试版」
         manifestPlaceholders["appLabel"] = "@string/app_name"
