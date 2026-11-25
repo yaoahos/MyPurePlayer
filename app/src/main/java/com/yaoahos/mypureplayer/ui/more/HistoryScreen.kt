@@ -78,6 +78,7 @@ import com.yaoahos.mypureplayer.ui.components.MediaInfoDialog
 import com.yaoahos.mypureplayer.ui.components.VideoThumb
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.launchUi
 import com.yaoahos.mypureplayer.ui.components.PlaylistTargetSheet
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
@@ -96,7 +97,7 @@ fun HistoryScreen(navController: NavHostController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val history by Graph.history.history.collectAsStateWithLifecycle()
-    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = Graph.settings.currentOrNull() ?: AppSettings())
     var clearConfirm by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<List<HistoryEntry>?>(null) }
     // 「加入列表」的目标由用户自己选
@@ -128,7 +129,7 @@ fun HistoryScreen(navController: NavHostController) {
 
     /** 历史条目只存了播放必需字段；详情弹窗尽量用库里的最新 item 补全大小/分辨率/位置。 */
     fun openInfo(entry: HistoryEntry) {
-        scope.launch { infoTarget = entry.fullItem() }
+        scope.launchUi { infoTarget = entry.fullItem() }
     }
 
     LaunchedEffect(Unit) {
@@ -141,7 +142,7 @@ fun HistoryScreen(navController: NavHostController) {
     // 页面停留期间也可能被别的应用删文件：每次切回本页都按 File.exists 对账一次。
     // 只清真不存在的，不会动刚刚播放到一半的记录。
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        scope.launch { Graph.history.pruneMissing() }
+        scope.launchUi { Graph.history.pruneMissing() }
     }
 
     Scaffold(
@@ -293,7 +294,7 @@ fun HistoryScreen(navController: NavHostController) {
             confirmText = "删除",
             destructive = true,
             onConfirm = {
-                scope.launch { Graph.history.removeByIds(entries.map { it.id }) }
+                scope.launchUi { Graph.history.removeByIds(entries.map { it.id }) }
                 pendingDelete = null
                 selection.exit()
             },
@@ -308,7 +309,7 @@ fun HistoryScreen(navController: NavHostController) {
             confirmText = "清空",
             destructive = true,
             onConfirm = {
-                scope.launch { Graph.history.clear() }
+                scope.launchUi { Graph.history.clear() }
                 clearConfirm = false
             },
             onDismiss = { clearConfirm = false },
@@ -324,7 +325,7 @@ fun HistoryScreen(navController: NavHostController) {
                     Playback.addToQueue(items)
                     Notice.success("已加入「正在播放」${items.size} 个视频")
                 } else {
-                    scope.launch {
+                    scope.launchUi {
                         val n = Graph.playlists.addVideos(targetId, items)
                         if (n > 0) Notice.success("已加入「$name」$n 个视频")
                         else Notice.error("「$name」没有新增视频")
@@ -446,7 +447,7 @@ private fun resume(
 ) {
     val start = if (resumePosition) entry.positionMs else 0L
     val stub = entry.toStub()
-    scope.launch {
+    scope.launchUi {
         val list: List<VideoItem> = when (entry.source) {
             MediaSource.LOCAL -> Graph.local.videosInFolder(entry.folderKey).ifEmpty { listOf(stub) }
             MediaSource.SMB -> {

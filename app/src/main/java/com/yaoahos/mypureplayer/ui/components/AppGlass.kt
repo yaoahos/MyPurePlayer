@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -78,6 +79,15 @@ data class AppGlassColors(
     val panel: Color,
     /** 弹窗/面板底：比卡片更实，保证文字稳定 */
     val panelStrong: Color,
+    /**
+     * 弹窗面板里的选项条。
+     *
+     * 弹窗面板本身是一块**比页面深一档**的淡色玻璃（见 [appDialogSurface]），
+     * 若选项条继续用 [panel]（同样深），两者只差 1~2 个色阶，一屏的选项会糊成一整块。
+     * 所以这一档刻意比面板**更亮、更白**，形成「深玻璃板 + 亮玻璃条」的层次 ——
+     * 与页面「浅底 + 深卡片」方向相反，但浮层里的层次本来就该这样读。
+     */
+    val dialogItem: Color,
     /** 栏位（顶栏/底栏）底 */
     val bar: Color,
     /** 栏位内容侧的那条亮线（玻璃厚度的高光） */
@@ -222,6 +232,8 @@ fun appGlass(): AppGlassColors {
                 // 不按比例 —— 壁纸取色给的色光可能很亮，按比例会把面板推成灰白
                 panel = mixToLuminance(cs.surface, tint, 0.014f).copy(alpha = 0.56f),
                 panelStrong = mixToLuminance(cs.surface, tint, 0.020f).copy(alpha = 0.94f),
+                // 深色下「更亮」才是浮起来：比面板提亮两档，叠在深面板上仍保持通透
+                dialogItem = mixToLuminance(cs.surface, tint, 0.058f).copy(alpha = 0.62f),
                 bar = mixToLuminance(cs.surface, tint, 0.030f).copy(alpha = 0.92f),
                 barEdge = Color.White.copy(alpha = 0.13f),
                 barLine = Color.White.copy(alpha = 0.05f),
@@ -251,6 +263,8 @@ fun appGlass(): AppGlassColors {
                 panel = mixToLuminance(cs.background, tint, 0.852f).copy(alpha = 0.66f),
                 // 弹窗 / 抽屉：不透明，保证文字稳定
                 panelStrong = mixToLuminance(cs.background, tint, 0.860f).copy(alpha = 0.96f),
+                // 日间同理反向：弹窗面板压到 0.89 左右的淡蓝玻璃，选项条必须回到近白
+                dialogItem = mixToLuminance(cs.background, tint, 0.955f).copy(alpha = 0.88f),
                 // 底栏：族里最深的一档，与页面底部之间是"同一支蓝、深半档"的过渡，
                 // 不是一个色块接一个色块
                 bar = mixToLuminance(cs.background, tint, 0.820f).copy(alpha = 0.84f),
@@ -370,11 +384,19 @@ fun Modifier.glassPageBackground(): Modifier {
 }
 
 /**
- * 玻璃弹窗面板：直接复用首页那张不透明渐变（顶色 → 底色 + 顶部薄白 + 横向主题色薄纱），
- * 让弹窗看起来就是「首页背景的一块」，而不是浮在页面上的另一套灰蓝板。
+ * 玻璃弹窗面板：一块**与页面不同色**的淡色玻璃，上沿受光、下沿下沉，靠上亮下暗的描边勾出厚度。
  *
- * 与 [Modifier.glassPageBackground] 同源同色，只多一层圆角、描边与投影把它从页面里勾出来。
- * 弹窗里的选项条再叠文件夹卡片同款玻璃 [appGlassSurface]，层次关系与首页「淡背景 + 淡蓝玻璃卡」完全一致。
+ * 早先这里直接复用 [Modifier.glassPageBackground] 的同一张渐变（同 top、同 bottom、
+ * 同 0.34 的顶部薄白），弹窗与身后页面的亮度都落在 0.93~0.97 的近白区间，只差几个色阶 ——
+ * 除了投影和一圈描边，看不出这是一块面板，用户的原话是「底板接近白色，不像玻璃面板」。
+ * 这正是文件开头那条约束：玻璃要能被看见，前提是**片体与背景不是同一个亮度**。
+ *
+ * 现在弹窗单独取一组色：比页面深一档、掺主题色更足的淡蓝玻璃（日间亮度约 0.89~0.94，
+ * 页面是 0.93~0.97），并且把「受光」从整片泛白改成一圈有落差的顶光，所以它像一块
+ * 有厚度的玻璃片压在页面上，而不是页面里挖出来的一个白框。
+ *
+ * 弹窗里的选项条仍叠 [appGlassSurface]（更透的 panel），与面板底保持 4% 左右的亮度差，
+ * 保证那一根根选项条在面板上依然数得清。
  */
 @Composable
 fun Modifier.appDialogSurface(
@@ -383,13 +405,19 @@ fun Modifier.appDialogSurface(
 ): Modifier {
     val cs = MaterialTheme.colorScheme
     val dark = cs.isDarkScheme()
-    val top = if (dark) cs.surface else cs.background
-    val bottom = pageGradientBottom(cs)
-    val white = if (dark) 0.03f else 0.34f
-    val sideAlpha = if (dark) 0.09f else 0.050f
+    val colorTint = cs.glassTint()
+    // 顶 / 底各自按「目标亮度」定档：日间比页面深一档并带明显的主题色相，
+    // 夜间比页面亮一档（深色下"浮起来"要更亮，方向与日间相反，见 appGlass 的注释）
+    val top = if (dark) mixToLuminance(cs.surface, colorTint, 0.032f)
+    else mixToLuminance(cs.background, colorTint, 0.900f)
+    val bottom = if (dark) mixToLuminance(cs.surface, colorTint, 0.019f)
+    else mixToLuminance(cs.background, colorTint, 0.866f)
+    // 受光只压顶部一段（22% 内衰减到 0），不再整片泛白 —— 整片白就是"白纸"的来源
+    val topLight = if (dark) 0.11f else 0.20f
+    val sideAlpha = if (dark) 0.11f else 0.060f
     val glass = appGlass()
-    val tile = androidx.compose.runtime.remember(top, bottom, white, sideAlpha, cs.primary) {
-        renderPageBackdrop(top, bottom, white, sideAlpha, cs.primary)
+    val tile = androidx.compose.runtime.remember(top, bottom, topLight, sideAlpha, cs.primary) {
+        renderDialogBackdrop(top, bottom, topLight, sideAlpha, cs.primary)
     }
     return this
         .shadow(
@@ -414,6 +442,28 @@ fun Modifier.appDialogSurface(
             brush = Brush.verticalGradient(listOf(glass.borderTop, glass.borderBottom)),
             shape = shape,
         )
+}
+
+/**
+ * M3 AlertDialog 的玻璃底。
+ *
+ * AlertDialog 只能通过 modifier 换外观，因此调用方必须同时把 `containerColor`
+ * 传成 Transparent —— 否则 M3 会先用 [AppGlassColors.panelStrong]（接近不透明）
+ * 铺满整个 Surface，这层渐变就完全看不见了。
+ *
+ * 圆角要传成与 `shape` 相同的值：描边与裁剪是两条路径，不一致会在四角露出线头。
+ *
+ * 投影用 0dp：AlertDialog 自带窗口阴影，而且弹窗窗口是按内容尺寸开的，
+ * 外部投影会被窗口边界裁掉一半，反而在上下出现直边。
+ */
+@Composable
+fun Modifier.alertDialogGlassSurface(
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(26.dp),
+): Modifier {
+    // 注意：这里**不能**关掉窗口 dim。AlertDialog 没有自绘遮罩，全靠窗口 dim 压暗页面；
+    // 关掉它页面会一动不动，弹窗像贴纸一样浮着。只有「窗口 dim + 自绘遮罩」叠两层的
+    // 自绘 Dialog（GlassChoiceDialog / 更新框 / 保险箱解锁）才需要关窗口那一层。
+    return appDialogSurface(shape, elevation = 0.dp)
 }
 
 /**
@@ -467,6 +517,59 @@ private fun renderPageBackdrop(
     return bmp.asImageBitmap()
 }
 
+/**
+ * 弹窗面板的贴图：上沿受光，22% 内就衰减到零，下半段回到平色，再压一层主题色横向薄纱。
+ *
+ * 与 [renderPageBackdrop] 唯一的差别是**受光只占顶部一小段**。页面是整屏大面积，
+ * 顶部薄白不能有可见边界（否则像贴了一条白带）；弹窗只占屏幕几分之一，受光必须有落差，
+ * 才读得成「一块有厚度的玻璃片」。这也是弹窗不再是白纸的关键：明暗差集中在顶部一圈，
+ * 配合上白下暗的描边，眼睛看到的是折边，不是填色。
+ */
+private fun renderDialogBackdrop(
+    top: Color,
+    bottom: Color,
+    topLight: Float,
+    sideAlpha: Float,
+    primary: Color,
+): androidx.compose.ui.graphics.ImageBitmap {
+    val w = 64
+    val h = 256
+    val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+    val paint = android.graphics.Paint()
+
+    fun at(t: Float, a: Float): Int =
+        androidx.compose.ui.graphics.lerp(
+            androidx.compose.ui.graphics.lerp(top, bottom, t),
+            Color.White,
+            a,
+        ).toArgb()
+
+    paint.shader = android.graphics.LinearGradient(
+        0f, 0f, 0f, h.toFloat(),
+        intArrayOf(
+            at(0f, topLight),
+            at(0.10f, topLight * 0.52f),
+            at(0.22f, topLight * 0.16f),
+            at(0.34f, 0f),
+            bottom.toArgb(),
+        ),
+        floatArrayOf(0f, 0.10f, 0.22f, 0.34f, 1f),
+        android.graphics.Shader.TileMode.CLAMP,
+    )
+    canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+
+    paint.shader = android.graphics.LinearGradient(
+        0f, 0f, w.toFloat(), 0f,
+        intArrayOf(0, primary.copy(alpha = sideAlpha).toArgb(), 0),
+        floatArrayOf(0f, 0.48f, 1f),
+        android.graphics.Shader.TileMode.CLAMP,
+    )
+    canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+
+    return bmp.asImageBitmap()
+}
+
 /** 玻璃卡片的修饰符：半透明底 + 片体光感 + 高光描边 + 柔和投影 */
 @Composable
 fun Modifier.appGlassSurface(
@@ -474,12 +577,19 @@ fun Modifier.appGlassSurface(
     strong: Boolean = false,
     elevation: Dp = 2.dp,
     tinted: Boolean = false,
-    /** 显式指定面色：动作按钮用更深一档的 [AppGlassColors.fab]，与所在卡片拉开对比。 */
+    /**
+     * 显式指定面色：动作按钮用更深一档的 [AppGlassColors.fab]；
+     * 弹窗里的选项条用更亮的 [AppGlassColors.dialogItem]。
+     * 与 [tinted] 同时给出时**以 tinted 为准**，选中态不会被面色盖掉。
+     */
     fillOverride: Color? = null,
 ): Modifier {
     val glass = appGlass()
-    val fill = fillOverride ?: when {
+    // 选中态优先：tinted 表示「当前生效的那一项」，不能被 fillOverride（普通面色）盖掉 ——
+    // 否则弹窗里指定了亮面的选项条，选中与未选中长得一模一样。
+    val fill = when {
         tinted -> glass.tintSoft
+        fillOverride != null -> fillOverride
         strong -> glass.panelStrong
         else -> glass.panel
     }
@@ -498,8 +608,9 @@ fun Modifier.appGlassSurface(
     //
     // 卡片上的三种光感都是**相对自身范围**的线性渐变，所以同一张 96×96 的图
     // 拉伸到任意卡片尺寸都成立，双线性插值能还原线性渐变。
+    val diagonalLight = if (glass.isDark) 0.07f else 0.13f
     val tile = androidx.compose.runtime.remember(fill, glass.isDark, topLight, bottomLight) {
-        renderSurfaceTile(fill, topLight, bottomLight, if (glass.isDark) 0.07f else 0.13f)
+        cachedSurfaceTile(fill, topLight, bottomLight, diagonalLight)
     }
 
     return this
@@ -528,6 +639,32 @@ fun Modifier.appGlassSurface(
             ),
             shape = shape,
         )
+}
+
+/**
+ * 同配色的贴图只生成一次，全站共享。
+ *
+ * 原来每张卡片在自己的 `remember` 里各渲染一张 96×96：设置页二十来行、更多页七行、
+ * 配置备份四组、播放列表每行一张 —— 进页面那一帧要连着做二十多次 Bitmap 分配
+ * 加 Canvas 绘制。贴图是只读的，多个节点画同一张 Bitmap 完全安全，
+ * 所以按「面色 + 三档光」共享一份即可。
+ *
+ * 容量 24：同一屏上真正不同的配色只有几种（页面卡片、弹窗选项条、选中态、深色一套），
+ * 动态取色换主题时旧条目被 LRU 自然淘汰。
+ */
+private val surfaceTiles =
+    android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(24)
+
+private fun cachedSurfaceTile(
+    fill: Color,
+    topLight: Float,
+    bottomLight: Float,
+    diagonalLight: Float,
+): androidx.compose.ui.graphics.ImageBitmap {
+    val key = "${fill.value}|$topLight|$bottomLight|$diagonalLight"
+    surfaceTiles.get(key)?.let { return it }
+    return renderSurfaceTile(fill, topLight, bottomLight, diagonalLight)
+        .also { surfaceTiles.put(key, it) }
 }
 
 /**
@@ -739,7 +876,90 @@ fun GlassFab(
 }
 
 /**
- * 带边框的玻璃动作按钮（表单里的「测试 / 上传 / 恢复」这类次要操作）。
+ * 玻璃按钮的语义档位。
+ *
+ * 弹窗底部、表单行尾的动作按钮原来全部是 M3 `TextButton`：没有片体、没有描边，
+ * 压在渐变玻璃面板上就是两行裸文字，与页面里「凡可点皆为玻璃片」的规则相反。
+ * 统一成玻璃按钮后，一个弹窗里要同时表达三种轻重，所以按语义分档取值，
+ * 而不是让调用方各自传颜色 —— 否则「取消」在不同弹窗里会是三种灰。
+ */
+enum class GlassButtonTone {
+    /** 主操作：确认、保存、去开启。accent 描边 + accent 文字 */
+    Accent,
+
+    /** 次操作：取消、关闭。中性描边 + 常规文字色，不与主操作抢视线 */
+    Neutral,
+
+    /** 破坏性操作：删除、清空、移出保险箱。error 描边 + error 文字 */
+    Danger,
+}
+
+/**
+ * 弹窗底部的玻璃按钮。签名与 `TextButton` 对齐（`onClick` + 尾随 content），
+ * 所以各处 `TextButton(...) { Text("取消") }` 可以直接换成它，而不用重排布局。
+ *
+ * 存在的理由：M3 的 `TextButton` 没有片体、没有描边，压在渐变玻璃面板上就是一行
+ * 裸文字；同一个 App 里页面用玻璃片、弹窗用裸文字，切换一次就露馅。
+ *
+ * 文字颜色由 [tone] 决定，content 里的 `Text` 不要再写死 color —— 否则会盖掉
+ * 禁用态与主题色的变化。
+ */
+@Composable
+fun GlassDialogButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    // 默认 Neutral：弹窗底部的次要动作（取消、关闭）占多数，主操作由调用方显式标 Accent，
+    // 否则所有按钮都染主题色，"取消"和"确定"会长得一模一样。
+    tone: GlassButtonTone = GlassButtonTone.Neutral,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
+) {
+    val glass = appGlass()
+    val shape = RoundedCornerShape(14.dp)
+    val buttonFill = when (tone) {
+        GlassButtonTone.Accent -> lerp(glass.panelStrong, glass.fab, 0.48f)
+        GlassButtonTone.Neutral -> glass.panelStrong
+        GlassButtonTone.Danger -> lerp(glass.panelStrong, glass.fab, 0.28f)
+    }
+    val contentColor = when (tone) {
+        GlassButtonTone.Accent -> glass.accent
+        GlassButtonTone.Neutral -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f)
+        GlassButtonTone.Danger -> MaterialTheme.colorScheme.error
+    }
+    val borderColor = when (tone) {
+        GlassButtonTone.Accent -> glass.accent.copy(alpha = 0.52f)
+        GlassButtonTone.Neutral -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
+        GlassButtonTone.Danger -> MaterialTheme.colorScheme.error.copy(alpha = 0.48f)
+    }
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier
+            .appGlassSurface(
+                shape = shape,
+                elevation = 1.dp,
+                fillOverride = if (enabled) buttonFill else glass.panelStrong,
+            )
+            .border(
+                width = 1.dp,
+                color = if (enabled) borderColor else borderColor.copy(alpha = 0.18f),
+                shape = shape,
+            ),
+        shape = shape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color.Transparent,
+            disabledContainerColor = Color.Transparent,
+            contentColor = contentColor,
+            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+        ),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+        elevation = null,
+        content = content,
+    )
+}
+
+/**
+ * 带边框的玻璃动作按钮（表单里的「测试 / 上传 / 恢复」、弹窗底部的「取消 / 确定」）。
  *
  * 不用 `OutlinedButton`：它自带的描边会和 [appGlassSurface] 的上下亮暗双色描边重叠成两道边；
  * 也不用 `TextButton`：没有片体、没有描边，在设置页那一片玻璃卡片里像一行裸文字。
@@ -753,36 +973,13 @@ fun GlassButton(
     enabled: Boolean = true,
     /** 操作进行中：按钮内部显示转圈，替代页面上重复的「处理中…」文字。 */
     loading: Boolean = false,
+    tone: GlassButtonTone = GlassButtonTone.Accent,
 ) {
-    val glass = appGlass()
-    val shape = RoundedCornerShape(14.dp)
-    // 按钮面比卡片深半档即可：fab 那一档（0.742）压在 panel（0.852）上太重，
-    // 用户反馈「按钮颜色太深、像实色块」。取 panelStrong→fab 的中点，保留边框和
-    // 投影分层，仍是玻璃但不再是一块深色片。
-    val buttonFill = lerp(glass.panelStrong, glass.fab, 0.48f)
-    Button(
+    GlassDialogButton(
         onClick = onClick,
+        modifier = modifier,
         enabled = enabled,
-        modifier = modifier
-            .appGlassSurface(
-                shape = shape,
-                elevation = 1.dp,
-                fillOverride = if (enabled) buttonFill else glass.panelStrong,
-            )
-            .border(
-                width = 1.dp,
-                color = glass.accent.copy(alpha = if (enabled) 0.52f else 0.18f),
-                shape = shape,
-            ),
-        shape = shape,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Color.Transparent,
-            disabledContainerColor = Color.Transparent,
-            contentColor = glass.accent,
-            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-        ),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-        elevation = null,
+        tone = tone,
     ) {
         // 固定最小内容宽度：转圈与文字宽度不同，切换时按钮不能忽宽忽窄挤动旁边按钮
         Box(Modifier.widthIn(min = 40.dp), contentAlignment = Alignment.Center) {
@@ -790,8 +987,7 @@ fun GlassButton(
                 CircularProgressIndicator(
                     modifier = Modifier.size(17.dp),
                     strokeWidth = 2.dp,
-                    color = if (enabled) glass.accent
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                    color = LocalContentColor.current,
                 )
             } else {
                 Text(text, style = MaterialTheme.typography.labelLarge)

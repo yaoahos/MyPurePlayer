@@ -13,6 +13,7 @@ import com.yaoahos.mypureplayer.BuildConfig
 import com.yaoahos.mypureplayer.data.SmbClient
 import com.yaoahos.mypureplayer.data.SmbRandomReader
 import com.yaoahos.mypureplayer.data.SmbServer
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
@@ -316,6 +317,12 @@ class SmbRoutingDataSource(private val context: Context) : BaseDataSource(false)
         val d: DataSource = when (scheme) {
             "smb" -> SmbExoDataSource()
             "http", "https" -> httpFactory.createDataSource()
+            // 保险箱密文：交给 VaultDataSource 按块解密。uri 的 path 就是密文的绝对路径。
+            "vault" -> {
+                val path = dataSpec.uri.path
+                if (path.isNullOrBlank()) throw IOException("保险箱视频路径无效")
+                VaultDataSource(File(path))
+            }
             else -> DefaultDataSource(context, false)
         }
         delegate = d

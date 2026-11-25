@@ -279,8 +279,14 @@ fun GlassPanelDialog(
     }
     androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            // 遮罩要盖住状态栏，否则顶部会亮着一条
+            decorFitsSystemWindows = false,
+        ),
     ) {
+        // 窗口自带的 dim 与自绘遮罩会叠成两层，导致状态栏比页面亮一截
+        DisableDialogWindowDim()
         UpdateDialogBody(title, onDismiss, content)
     }
 }

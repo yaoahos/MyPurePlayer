@@ -1,5 +1,8 @@
 package com.yaoahos.mypureplayer.ui.play
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassTextField
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import com.yaoahos.mypureplayer.ui.HideShellBottomBar
 
 import androidx.activity.compose.BackHandler
@@ -40,7 +43,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -71,12 +73,13 @@ import com.yaoahos.mypureplayer.ui.components.GlassChoiceRow
 import com.yaoahos.mypureplayer.ui.components.GlassFab
 import com.yaoahos.mypureplayer.ui.components.ListSelection
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.launchUi
 import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
-import com.yaoahos.mypureplayer.ui.components.appGlass
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
 import com.yaoahos.mypureplayer.ui.components.selectionCardOutline
@@ -170,7 +173,7 @@ fun PlaylistScreen(navController: NavHostController) {
                             val targets = selectedLists
                             val pin = !allPinned
                             selection.exit()
-                            scope.launch {
+                            scope.launchUi {
                                 targets.forEach { Graph.playlists.setPinned(it.id, pin) }
                                 Notice.success(if (pin) "已置顶 ${targets.size} 个列表" else "已取消置顶")
                             }
@@ -303,7 +306,7 @@ fun PlaylistScreen(navController: NavHostController) {
             confirmText = "删除",
             destructive = true,
             onConfirm = {
-                scope.launch {
+                scope.launchUi {
                     targets.forEach { Graph.playlists.delete(it.id) }
                     pendingDelete = null
                     selection.exit()
@@ -318,38 +321,38 @@ fun PlaylistScreen(navController: NavHostController) {
     renameTarget?.let { target ->
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { renameTarget = null },
             title = { Text("重命名列表") },
             text = {
-                OutlinedTextField(
+                GlassTextField(
                     value = renameText,
                     onValueChange = { renameText = it },
-                    label = { Text("名称") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    label = "名称",
                     modifier = Modifier.fillMaxWidth(),
                 )
             },
             confirmButton = {
-                TextButton(
+                GlassDialogButton(
                     onClick = {
                         val name = renameText.trim()
                         if (name.isEmpty()) {
                             Notice.error("请输入名称")
-                            return@TextButton
+                            return@GlassDialogButton
                         }
                         renameTarget = null
-                        scope.launch {
+                        scope.launchUi {
                             Graph.playlists.rename(target.id, name)
                             Notice.success("已重命名")
                         }
                     },
                     enabled = renameText.isNotBlank(),
+                tone = GlassButtonTone.Accent,
                 ) { Text("保存") }
             },
-            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("取消") } },
+            dismissButton = { GlassDialogButton(onClick = { renameTarget = null }) { Text("取消") } },
         )
     }
 
@@ -357,40 +360,40 @@ fun PlaylistScreen(navController: NavHostController) {
     if (createOpen) {
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { createOpen = false },
             title = { Text("创建播放列表") },
             text = {
-                OutlinedTextField(
+                GlassTextField(
                     value = newName,
                     onValueChange = { newName = it },
-                    label = { Text("名称") },
-                    placeholder = { Text("例如：周末观影") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    label = "名称",
+                    placeholder = "例如：周末观影",
                     modifier = Modifier.fillMaxWidth(),
                 )
             },
             confirmButton = {
-                TextButton(
+                GlassDialogButton(
                     onClick = {
                         val name = newName.trim()
                         if (name.isEmpty()) {
                             Notice.error("请输入名称")
-                            return@TextButton
+                            return@GlassDialogButton
                         }
                         createOpen = false
-                        scope.launch {
+                        scope.launchUi {
                             val pl = Graph.playlists.create(name)
                             Notice.success("已创建「${pl.name}」")
                             navController.navigate(Routes.playlistDetail(pl.id))
                         }
                     },
                     enabled = newName.isNotBlank(),
+                tone = GlassButtonTone.Accent,
                 ) { Text("创建") }
             },
-            dismissButton = { TextButton(onClick = { createOpen = false }) { Text("取消") } },
+            dismissButton = { GlassDialogButton(onClick = { createOpen = false }) { Text("取消") } },
         )
     }
 }
@@ -480,7 +483,7 @@ fun AddVideoSheet(
         }
         Spacer(Modifier.height(6.dp))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            GlassDialogButton(onClick = onDismiss) { Text("取消") }
         }
     }
 }

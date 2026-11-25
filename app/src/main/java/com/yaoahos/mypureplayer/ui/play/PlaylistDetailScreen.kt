@@ -1,5 +1,6 @@
 package com.yaoahos.mypureplayer.ui.play
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -47,7 +48,6 @@ import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -89,6 +89,7 @@ import com.yaoahos.mypureplayer.ui.components.ListSelection
 import java.io.File
 import com.yaoahos.mypureplayer.ui.components.MediaInfoDialog
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.launchUi
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.SearchField
@@ -142,13 +143,16 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
     // 自建播放列表里的本地条目也可能是被系统相册/文件管理器删掉的死记录。
     // 每次切回页面按真实文件对账一次，避免点进去才看到"文件不存在"。
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        scope.launch {
+        scope.launchUi {
             Graph.playlists.load()
             Graph.local.scan(silent = true)
             val current = Graph.playlists.playlists.value.firstOrNull { it.id == playlistId }
-            val stale = current?.videos?.filter { item ->
-                item.localPath?.let { path -> path.isNotBlank() && !File(path).exists() } == true
-            }.orEmpty()
+            // 逐个 File.exists() 是系统调用：列表几百条时不能在主线程做
+            val stale = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                current?.videos?.filter { item ->
+                    item.localPath?.let { path -> path.isNotBlank() && !File(path).exists() } == true
+                }.orEmpty()
+            }
             if (stale.isNotEmpty()) Graph.playlists.dropGone(stale)
         }
     }
@@ -304,28 +308,19 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                         title = "播放列表不存在",
                         message = "这个列表可能已被删除。",
                     )
-                    allMembers.isEmpty() -> Column(
-                        Modifier.fillMaxSize().padding(horizontal = 24.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        EmptyState(
-                            icon = Icons.Rounded.PlayArrow,
-                            title = "列表还是空的",
-                            message = if (isNowPlaying) {
-                                "打开任意视频会自动把同目录的视频加入这里，不能手动添加。"
-                            } else {
-                                "点右下角 + 把视频或整个文件夹加进来。"
-                            },
-                        )
-                        // 「正在播放」只由真实播放行为填充，不提供手动添加入口
-                        if (!isNowPlaying) {
-                            Spacer(Modifier.height(8.dp))
-                            FilledTonalButton(onClick = { addSheetOpen = true }) {
-                                Text("添加视频")
-                            }
-                        }
-                    }
+                    // 空列表不给按钮：右下角已经有 + 了，同一个动作摆两处反而分散注意。
+                    // 说明文字直接指向那个加号即可（早先这里还自己拼过一行 Button，
+                    // 会被 EmptyState 内部的 fillMaxSize 挤到屏幕最底，已一并删掉）。
+                    // 「正在播放」只由真实播放行为填充，所以它连文案都不同。
+                    allMembers.isEmpty() -> EmptyState(
+                        icon = Icons.Rounded.PlayArrow,
+                        title = "列表还是空的",
+                        message = if (isNowPlaying) {
+                            "打开任意视频会自动把同目录的视频加入这里，不能手动添加。"
+                        } else {
+                            "点右下角 + 把视频或整个文件夹加进来。"
+                        },
+                    )
                     members.isEmpty() -> EmptyState(
                         icon = Icons.Rounded.Search,
                         title = "没有匹配的视频",
@@ -616,7 +611,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                 if (isNowPlaying) {
                     Playback.reorderQueue(ordered)
                 } else {
-                    scope.launch { Graph.playlists.reorder(playlistId, ordered) }
+                    scope.launchUi { Graph.playlists.reorder(playlistId, ordered) }
                 }
                 Notice.success("已按「${key.label}」重新排列")
             },
@@ -633,7 +628,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
             destructive = true,
             onConfirm = {
                 pendingHistoryDelete = null
-                scope.launch {
+                scope.launchUi {
                     val n = Graph.history.removeAll(targets.map { it.id })
                     Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
                 }
@@ -662,7 +657,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                     selection.exit()
                     Notice.success("已移出正在播放")
                 } else {
-                    scope.launch {
+                    scope.launchUi {
                         Graph.playlists.removeVideos(playlistId, ids)
                         pendingRemove = null
                         selection.exit()
@@ -682,7 +677,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
             destructive = true,
             onConfirm = {
                 if (isNowPlaying) Playback.clearQueue()
-                else scope.launch { Graph.playlists.reorder(playlistId, emptyList()) }
+                else scope.launchUi { Graph.playlists.reorder(playlistId, emptyList()) }
                 pendingClear = false
                 selection.exit()
                 Notice.success("已清空「$title」")
@@ -726,7 +721,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
             }
             Spacer(Modifier.height(6.dp))
             androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                TextButton(onClick = { localFoldersOpen = false }) { Text("取消") }
+                GlassDialogButton(onClick = { localFoldersOpen = false }) { Text("取消") }
             }
         }
     }
@@ -760,7 +755,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
             }
             Spacer(Modifier.height(6.dp))
             androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                TextButton(onClick = { serverPickerOpen = false }) { Text("取消") }
+                GlassDialogButton(onClick = { serverPickerOpen = false }) { Text("取消") }
             }
         }
     }

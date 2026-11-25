@@ -70,6 +70,27 @@ object BackupPrefs {
     private val cipher = CredentialCipher("mypureplayer_webdav_cred_v1")
 
     /**
+     * 进程内最后一次读到的配置与短码。
+     *
+     * 备份页有 8 个输入框：若先用空值组合、读盘后再把值填进去，`OutlinedTextField`
+     * 的标签会当着用户的面从居中浮到顶部，同时还要多组合一轮。App 启动时
+     * [CloudBackupScheduler] 的恢复流程已经读过一次，这里把结果留下来，
+     * 页面首帧就能同步拿到真值 —— 既不跳，也不必先画骨架再换内容。
+     *
+     * 只在同一进程内有效；写盘一律经本对象的 [save]，因此不会读到过期值。
+     */
+    @Volatile
+    private var cached: WebDavConfig? = null
+
+    @Volatile
+    private var cachedDeviceId: String? = null
+
+    /** 页面首帧用；进程刚起、还没读过时是 null */
+    fun cachedConfig(): WebDavConfig? = cached
+
+    fun cachedDeviceIdOrNull(): String? = cachedDeviceId
+
+    /**
      * 地址栏允许粘贴带文件名的完整地址（`.../MyPurePlayer-config.mpp`），
      * 这里把它折回目录，避免最终路径里多出一层假目录。
      */
@@ -83,7 +104,7 @@ object BackupPrefs {
 
     suspend fun get(context: Context): WebDavConfig {
         val prefs = context.backupDataStore.data.first()
-        return WebDavConfig(
+        val config = WebDavConfig(
             url = directoryOf(prefs[Keys.url].orEmpty()),
             port = prefs[Keys.port].orEmpty(),
             folder = prefs[Keys.folder] ?: ConfigBackup.DEFAULT_FOLDER,
@@ -95,6 +116,8 @@ object BackupPrefs {
             lastSyncAt = prefs[Keys.lastSyncAt] ?: 0L,
             lastResult = prefs[Keys.lastResult].orEmpty(),
         )
+        cached = config
+        return config
     }
 
     suspend fun save(context: Context, config: WebDavConfig) {
@@ -109,17 +132,23 @@ object BackupPrefs {
             it[Keys.deviceName] = DeviceProfile.displayName(config.deviceName)
             it[Keys.autoHours] = config.autoHours
         }
+        cached = config
     }
 
     /**
      * 本机短码：首次生成后不再变。改名只影响文件名前半段，短码始终能区分同型号设备。
      */
     suspend fun deviceId(context: Context): String {
+        cachedDeviceId?.let { return it }
         context.backupDataStore.data.first()[Keys.deviceId]
             ?.takeIf { it.length == 4 }
-            ?.let { return it }
+            ?.let {
+                cachedDeviceId = it
+                return it
+            }
         val generated = DeviceProfile.newId()
         context.backupDataStore.edit { it[Keys.deviceId] = generated }
+        cachedDeviceId = generated
         return generated
     }
 

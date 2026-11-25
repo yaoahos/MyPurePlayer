@@ -42,6 +42,8 @@ import com.yaoahos.mypureplayer.ui.components.UpdatePromptHost
 import com.yaoahos.mypureplayer.ui.theme.MyPurePlayerTheme
 import com.yaoahos.mypureplayer.ui.theme.ThemePalette
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 用 FragmentActivity 而不是 ComponentActivity：保险箱的指纹解锁依赖
@@ -52,11 +54,16 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Graph.init(applicationContext)
+        // 首帧的主题必须是对的：`initialValue` 只是兜底，实际值要等 DataStore
+        // 第一次读盘回来（几十毫秒），那期间界面已按默认配色画过一帧 ——
+        // 用户选的是绿主题，会看到冷启动时先闪一下蓝。
+        // 这里等一次，但给上限：读不出来（极慢盘/异常）就按默认配色走，绝不拖住启动。
+        runBlocking { withTimeoutOrNull(150L) { Graph.settings.warmUp() } }
         enableEdgeToEdge()
 
         setContent {
             val settings by Graph.settings.settings
-                .collectAsStateWithLifecycle(initialValue = AppSettings())
+                .collectAsStateWithLifecycle(initialValue = Graph.settings.currentOrNull() ?: AppSettings())
             val dark = when (settings.darkMode) {
                 1 -> false
                 2 -> true
@@ -244,6 +251,9 @@ class MainActivity : FragmentActivity() {
             val armed = Playback.settings.pipOnHome &&
                 Playback.playerScreenVisible &&
                 state.item != null &&
+                // 保险箱视频不进小窗：内容会直接挂在桌面之上，且小窗里的 FLAG_SECURE
+                // 表现因机型而异，不能指望它挡住画面
+                state.item?.id?.startsWith("vault:") != true &&
                 state.playing &&
                 !state.backgroundAudio &&
                 !Playback.pictureInPicture
@@ -290,6 +300,7 @@ class MainActivity : FragmentActivity() {
         ) return
         val state = Playback.state.value
         if (!Playback.settings.pipOnHome) return
+        if (state.item?.id?.startsWith("vault:") == true) return
         if (state.item == null || !state.playing || state.backgroundAudio || Playback.pictureInPicture) return
         val ratio = if (state.videoWidth > 0 && state.videoHeight > 0) {
             Rational(state.videoWidth, state.videoHeight)

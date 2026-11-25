@@ -216,6 +216,15 @@ object ConfigBackup {
     suspend fun restore(payload: Payload): RestoreResult {
         var sections = 0
         var missingPwd = 0
+        // 备份文件是外部数据（旧版本导出的、手工改过的、跨设备合并过的），
+        // 不能假设条目 key 唯一。历史/队列/播放列表在界面里都用 id 当 Lazy 的 key，
+        // 重复值会抛 "Key ... was already used" 把整页带走 —— 而队列是落盘的，
+        // 重启后照样崩。入库前统一去重，比在每个列表页各兜一层更可靠。
+        val queue = payload.queue.distinctBy { it.id }
+        val history = payload.history.distinctBy { it.id }
+        val playlists = payload.playlists
+            .distinctBy { it.id }
+            .map { pl -> pl.copy(videos = pl.videos.distinctBy { v -> v.id }) }
         payload.settings?.let {
             Graph.settings.restore(it)
             sections++
@@ -247,13 +256,13 @@ object ConfigBackup {
         }
         // 内容状态：空列表也照样覆盖——用户可能在备份时就是空的，恢复后理应还原成空，
         // 否则旧设备的数据会残留在恢复后的机器上，与备份快照不一致。
-        Graph.history.replaceAll(payload.history)
+        Graph.history.replaceAll(history)
         sections++
-        Graph.queue.save(payload.queue)
+        Graph.queue.save(queue)
         // 只写磁盘不够：Playback 的内存队列才是界面与播放器实际读的那份，必须同步替换
-        com.yaoahos.mypureplayer.playback.Playback.setQueue(payload.queue)
+        com.yaoahos.mypureplayer.playback.Playback.setQueue(queue)
         sections++
-        Graph.playlists.replaceAll(payload.playlists)
+        Graph.playlists.replaceAll(playlists)
         sections++
         return RestoreResult(sections, missingPwd)
     }

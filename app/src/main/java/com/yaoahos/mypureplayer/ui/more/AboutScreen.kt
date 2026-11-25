@@ -98,7 +98,7 @@ fun AboutScreen(navController: NavHostController) {
     val downloading = download?.running == true
     val progress = download?.progress ?: 0
 
-    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = Graph.settings.currentOrNull() ?: AppSettings())
 
     Scaffold(
         // 透明容器：背景由根部的常驻玻璃层统一绘制，内部页面与底栏页共用同一张底
@@ -261,6 +261,7 @@ fun AboutScreen(navController: NavHostController) {
         // （左右 22dp / 上下 20dp），底部按钮只隔 16dp，按钮换成与「测试 / 保存」
         // 同一种玻璃按钮。
         GlassPanelDialog(title = "更新日志", onDismiss = { showLog = false }) {
+            val glass = appGlass()
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -278,7 +279,7 @@ fun AboutScreen(navController: NavHostController) {
                     if (index > 0) {
                         HorizontalDivider(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                            modifier = Modifier.padding(vertical = 12.dp),
+                            modifier = Modifier.padding(vertical = 16.dp),
                         )
                     }
                     Text(
@@ -288,15 +289,32 @@ fun AboutScreen(navController: NavHostController) {
                         },
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 6.dp),
+                        modifier = Modifier.padding(bottom = 2.dp),
                     )
-                    note.notes.forEach { line ->
-                        Text(
-                            "· $line",
-                            style = MaterialTheme.typography.bodySmall,
-                            lineHeight = 18.sp,
-                            modifier = Modifier.padding(top = 3.dp),
-                        )
+                    // 按「新增/优化/变更/修复」分段渲染。md 里本来就是这个顺序，
+                    // 这里只切段不重排；前缀提到组标题上，正文也因此少 3 个字、更少折行。
+                    // 一整版 22 条若继续平铺成一片灰字，读起来就是「堆在一块」。
+                    note.notes.byCategory().forEachIndexed { groupIndex, (category, items) ->
+                        if (category.isNotEmpty()) {
+                            Text(
+                                category,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.6.sp,
+                                color = glass.accent,
+                                modifier = Modifier.padding(top = if (groupIndex == 0) 8.dp else 14.dp),
+                            )
+                        } else if (groupIndex > 0) {
+                            Spacer(Modifier.height(6.dp))
+                        }
+                        items.forEach { line ->
+                            Text(
+                                "· $line",
+                                style = MaterialTheme.typography.bodySmall,
+                                lineHeight = 18.sp,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
                     }
                 }
                 // 「查看更早的版本」属于**内容**，跟在最后一条日志后面，随日志一起滚动。
@@ -574,4 +592,25 @@ private fun SectionFrame(
             content = content,
         )
     }
+}
+
+/** 条目前缀形如「新增：」「优化:」；中文冒号是惯例，英文冒号一并容错 */
+private val CATEGORY_PREFIX = Regex("^(新增|优化|变更|修复)[：:]\\s*")
+
+/**
+ * 把一版日志按「新增 / 优化 / 变更 / 修复」切成连续的组。
+ *
+ * 只切段、不排序：md 里本来就按这四类写，重排反而会让「新增」跑到「修复」后面。
+ * 没有前缀的条目（1.0.0 的功能式写法）归到空分类，由调用方原样当项目符号列出。
+ */
+private fun List<String>.byCategory(): List<Pair<String, List<String>>> {
+    val groups = ArrayList<Pair<String, ArrayList<String>>>()
+    for (line in this) {
+        val match = CATEGORY_PREFIX.find(line)
+        val category = match?.groupValues?.getOrNull(1).orEmpty()
+        val body = if (match != null) line.substring(match.range.last + 1).trim() else line
+        if (groups.isEmpty() || groups.last().first != category) groups += category to ArrayList()
+        groups.last().second += body
+    }
+    return groups.map { (category, items) -> category to items.toList() }
 }

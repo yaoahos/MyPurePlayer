@@ -228,7 +228,13 @@ data class TrashEntry(
     val width: Int = 0,
     val height: Int = 0,
     val deletedAt: Long,
-    /** 在回收站目录内的实际文件名（可能加了时间前缀避免重名） */
+    /**
+     * 在回收站里的实际落盘位置。
+     *
+     * 1.0.5 起是**绝对路径**，形如 `/storage/emulated/0/Android/media/<包名>/trash/6bb1df166f93.trash`；
+     * 旧版本只存文件名（相对应用私有目录），解析见 `TrashRepo.fileOf`。
+     * 物理文件名是随机串，原文件名只存在 `.meta` 与 [fileName] 里。
+     */
     val storedName: String,
     /** 删除的是一个文件夹（整目录搬走、整目录恢复） */
     val isFolder: Boolean = false,

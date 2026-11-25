@@ -29,10 +29,53 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        installCrashRecorder()
         if (BuildConfig.DEBUG) installStrictMode()
         Graph.init(this)
         restoreCloudBackupSchedule()
         autoCheckUpdate()
+    }
+
+    /**
+     * 把未捕获异常写到 `files/logs/crash.log`，再交回系统默认处理。
+     *
+     * 「偶发闪退」最难受的地方是没有现场：logcat 会被系统滚动冲掉，用户也说不清
+     * 点的是哪一步。这里只做记录、不改变崩溃行为（该退出仍然退出）——
+     * 把崩溃悄悄吞掉会变成"什么都没发生"，反而更难查。
+     *
+     * 只留最近一次崩溃 + 一份上一份，文件超限就轮转，避免反复崩溃把存储写满。
+     */
+    private fun installCrashRecorder() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching { recordCrash(thread, error) }
+            if (previous != null) {
+                previous.uncaughtException(thread, error)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(10)
+            }
+        }
+    }
+
+    private fun recordCrash(thread: Thread, error: Throwable) {
+        val dir = java.io.File(filesDir, "logs").apply { mkdirs() }
+        val file = java.io.File(dir, "crash.log")
+        // 256KB 足够放十几次完整栈；超了就留一份上一次的，其余丢弃
+        if (file.length() > 256 * 1024) {
+            val previous = java.io.File(dir, "crash.prev.log")
+            runCatching { previous.delete() }
+            runCatching { file.renameTo(previous) }
+        }
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+            .format(java.util.Date())
+        file.appendText(
+            buildString {
+                appendLine("===== $stamp  thread=${thread.name} =====")
+                appendLine(android.util.Log.getStackTraceString(error))
+                appendLine()
+            },
+        )
     }
 
     /**

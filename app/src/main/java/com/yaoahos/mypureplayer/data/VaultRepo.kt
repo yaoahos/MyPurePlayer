@@ -58,6 +58,67 @@ class VaultRepo(
     private val mutex = Mutex()
 
     /**
+     * 条目 id 的发号器：与 [TrashRepo] 同一套做法。
+     *
+     * 原来用 `System.currentTimeMillis() + index`：同一批次内 index 不同还安全，
+     * 但跨批次（时钟被回拨、或两次添加落在同一毫秒）就会撞号。
+     * 撞号的后果很实在：`items(key = { it.id })` 直接抛异常导致保险箱页打不开，
+     * `deletePermanently` 按 id 过滤会把另一条一起删掉。
+     */
+    private val lastId = java.util.concurrent.atomic.AtomicLong(0)
+
+    private val secureRandom = java.security.SecureRandom()
+
+    /** 4 字节随机串（8 位十六进制）：让密文文件名不会因为批次/时钟而重名 */
+    private fun randomHex(): String {
+        val bytes = ByteArray(4)
+        secureRandom.nextBytes(bytes)
+        return bytes.joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+    }
+
+    private fun nextId(): Long {
+        while (true) {
+            val prev = lastId.get()
+            val next = maxOf(System.currentTimeMillis(), prev + 1)
+            if (lastId.compareAndSet(prev, next)) return next
+        }
+    }
+
+    /**
+     * 把历史数据里重复的 id 重新发号，并把基线抬到最大值之上。
+     *
+     * 注意一个代价：`vault:<id>` 是播放进度的键，改 id 的那一条会丢掉续播位置。
+     * 但它本来就和别人共用一个键、进度也是串的，改掉比一直串着好。
+     */
+    private fun ensureUniqueIds(list: List<VaultEntry>): List<VaultEntry> {
+        val maxExisting = list.maxOfOrNull { it.id } ?: 0L
+        lastId.updateAndGet { prev -> maxOf(prev, maxExisting) }
+        val seen = HashSet<Long>(list.size)
+        var changed = false
+        val out = list.map { entry ->
+            if (seen.add(entry.id)) {
+                entry
+            } else {
+                changed = true
+                entry.copy(id = nextId())
+            }
+        }
+        return if (changed) out else list
+    }
+
+    /** 目录所在卷的可用字节数；取不到时返回 [Long.MAX_VALUE]，宁可放行也不误伤 */
+    private fun freeBytes(dir: File): Long = runCatching {
+        android.os.StatFs(dir.absolutePath).availableBytes
+    }.getOrDefault(Long.MAX_VALUE)
+
+    /** 人类可读的体积，只用于错误提示 */
+    private fun readSize(bytes: Long): String = when {
+        bytes >= 1L shl 30 -> String.format(java.util.Locale.US, "%.1f GB", bytes / (1L shl 30).toDouble())
+        bytes >= 1L shl 20 -> String.format(java.util.Locale.US, "%.0f MB", bytes / (1L shl 20).toDouble())
+        else -> String.format(java.util.Locale.US, "%.0f KB", bytes / 1024.0)
+    }
+
+    /**
      * 自动上锁：解锁后 5 分钟无操作就收回。
      *
      * 之前只有「离开保险箱页面立即上锁」一条规则，副作用是隐藏视频、从播放页
@@ -76,7 +137,59 @@ class VaultRepo(
         // 不在冷启动时解密钥：v3 密钥需要 PIN 才能解，必须等用户验证。
         // 旧格式（仅 Keystore 包裹）保持原样，解锁时会走对应的兼容解包路径。
         _config.value = stored
-        _entries.value = entryStore.read().sortedByDescending { it.addedAt }
+        val raw = entryStore.read()
+        val sorted = raw.sortedByDescending { it.addedAt }
+        val healed = ensureUniqueIds(sorted)
+        // 把「密文在、索引里没有」的文件补回来（见 adoptOrphans）。放在 load 而不是
+        // 只在进入保险箱时扫：隐藏失败的后果是文件对用户不可见，越早补回来越好。
+        val adopted = withContext(Dispatchers.IO) { adoptOrphans(healed) }
+        val all = (adopted + healed).sortedByDescending { it.addedAt }
+        _entries.value = all
+        // 有认领或自愈结果就回写，失败由 writeEntries 兜住（下次启动还能再扫一遍）
+        if (all != sorted) writeEntries(all)
+    }
+
+    /**
+     * 认领「密文在、索引里没有」的文件。
+     *
+     * 隐藏的落盘顺序是「加密写完 → 删原文件 → 记索引」。最后一步失败（空间不足、
+     * 目录不可写）时密文已经在 vault 里、原文件也删掉了，索引却不知道它 ——
+     * 界面上完全看不到这个文件，磁盘却一直被占着，用户理解成「文件丢了」。
+     * 索引写失败本身可以下次再写，但前提是文件找得回来，所以加载时扫一遍目录。
+     *
+     * 文件名里带着加密时刻（`v_<毫秒>_<序号>_<随机>.bin`），拿不到原名就按它生成
+     * 一个可排序的占位名：至少能播、能删、能移出，而不是变成不可见的占用。
+     * 加密中断留下的 `.tmp` 没有完整末尾、解不开，直接清掉。
+     */
+    private fun adoptOrphans(known: List<VaultEntry>): List<VaultEntry> {
+        val dir = root
+        if (!dir.isDirectory) return emptyList()
+        val knownNames = known.mapTo(HashSet()) { it.storedName }
+        val out = mutableListOf<VaultEntry>()
+        dir.listFiles().orEmpty().forEach { f ->
+            if (!f.isFile) return@forEach
+            if (f.name.endsWith(".tmp")) {
+                runCatching { f.delete() }
+                return@forEach
+            }
+            if (!f.name.endsWith(".bin") || f.name in knownNames) return@forEach
+            val millis = ORPHAN_STAMP.find(f.name)?.groupValues?.get(1)?.toLongOrNull()
+                ?: f.lastModified().takeIf { it > 0 }
+                ?: System.currentTimeMillis()
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US)
+                .format(java.util.Date(millis))
+            val placeholder = "已加密视频_$stamp.mp4"
+            out += VaultEntry(
+                id = nextId(),
+                title = "已加密视频_$stamp",
+                fileName = placeholder,
+                originalPath = "",
+                sizeBytes = f.length(),
+                addedAt = millis,
+                storedName = f.name,
+            )
+        }
+        return out
     }
 
     /**
@@ -187,7 +300,7 @@ class VaultRepo(
                 failedAttempts = 0,
                 lockedUntil = 0L,
             )
-            configStore.write(next)
+            if (!writeConfig(next)) error("写入配置失败，请检查存储空间")
             _config.value = next
             _unlocked.value = true
             scheduleAutoLock()
@@ -208,7 +321,7 @@ class VaultRepo(
         if (!cfg.enabled) return@withContext false
         if (!enabled) {
             val next = cfg.copy(biometric = false, bioWrappedKey = "")
-            configStore.write(next)
+            if (!writeConfig(next)) return@withContext false
             _config.value = next
             return@withContext true
         }
@@ -230,7 +343,7 @@ class VaultRepo(
             val key = cryptoKeyFromMemory() ?: return@withContext false
             val bio = Crypto.wrapWithBioCipher(cipher, key) ?: return@withContext false
             val next = cfg.copy(biometric = true, bioWrappedKey = bio)
-            configStore.write(next)
+            if (!writeConfig(next)) return@withContext false
             _config.value = next
             true
         }
@@ -327,7 +440,8 @@ class VaultRepo(
             System.currentTimeMillis() + (minutes * 60_000L).coerceAtMost(24L * 3600_000L)
         } else 0L
         val next = cfg.copy(failedAttempts = attempts, lockedUntil = lockedUntil)
-        configStore.write(next)
+        // 计数只是节流用途，写失败不影响本次判定，更不能让解锁页闪退
+        writeConfig(next)
         _config.value = next
         return false
     }
@@ -341,6 +455,9 @@ class VaultRepo(
 
         private const val KH2_PREFIX = "KH2:"
         private const val V4_PREFIX = "V4:"
+
+        /** 密文名里的加密时刻：`v_<13 位毫秒>_<序号>_<随机串>.bin` */
+        private val ORPHAN_STAMP = Regex("^v_(\\d{13})_")
     }
 
     /** 指纹认证成功后调用：解密器已由 BiometricPrompt 的 CryptoObject 解出密钥 */
@@ -386,7 +503,9 @@ class VaultRepo(
      * 现在改成：只要还有没搬出去的，就保留门禁和密钥，并把原因说清楚，
      * 让他先修好权限/空间再关一次。
      */
-    suspend fun disable(): DisableResult {
+    suspend fun disable(
+        onProgress: (Int, Int, Float) -> Unit = { _, _, _ -> },
+    ): DisableResult {
         val restoredOut = mutableListOf<Pair<VaultEntry, String>>()
         val result = withContext(Dispatchers.IO) {
             mutex.withLock {
@@ -401,8 +520,8 @@ class VaultRepo(
                 var restored = 0
                 var failed = 0
                 var firstError: String? = null
-                list.forEach { entry ->
-                    if (restoreInternal(entry, restoredOut) != null) {
+                list.forEachIndexed { index, entry ->
+                    if (restoreInternal(entry, restoredOut) { p -> onProgress(index, list.size, p) } != null) {
                         restored++
                     } else {
                         failed++
@@ -417,8 +536,16 @@ class VaultRepo(
                             "保险箱已保留，避免文件再也解不开",
                     )
                 }
-                // 内容已全部解密移出，此时清门禁才是安全的
-                configStore.write(VaultConfig())
+                // 内容已全部解密移出，此时清门禁才是安全的。
+                // 写不进去就保持原状：视频都已经在原处了，用户下次还能再关一次；
+                // 反过来只清内存不清盘，重启后门禁还在、密文却空了，更难解释。
+                if (!writeConfig(VaultConfig())) {
+                    return@withLock DisableResult(
+                        restored,
+                        0,
+                        "视频已全部移出，但关闭保险箱失败，请重试",
+                    )
+                }
                 _config.value = VaultConfig()
                 autoLockJob?.cancel()
                 autoLockJob = null
@@ -436,6 +563,15 @@ class VaultRepo(
     // ------------------------------------------------------------ 内容
 
     fun fileOf(entry: VaultEntry): File = File(root, entry.storedName)
+
+    /**
+     * 这个条目是不是「可随机读」的 MV4 密文。
+     *
+     * MV4 能边读边解，播放不需要先落一份明文；MV3 是整体 CBC，只能先整体解密。
+     * 判断只看文件头的 magic，不做任何解密。
+     */
+    fun isRandomAccessible(entry: VaultEntry): Boolean =
+        Crypto.probe(fileOf(entry)) is Crypto.FileFormat.Mv4
 
     fun totalSize(): Long = _entries.value.sumOf { it.sizeBytes }
 
@@ -455,6 +591,20 @@ class VaultRepo(
                 return@withLock Result.failure(IllegalStateException("保险箱已锁定，请先解锁后再隐藏"))
             }
             root.mkdirs()
+            // 加密要写出一份与明文等大的密文，峰值新增就是这些「明文大小」之和。
+            // 不预检的话会加密到一半才失败：已完成的那些已经删了明文、也写了索引，
+            // 剩下的留在原地，用户看到的是「隐藏了一部分，还有一部分没动」外加一条空间不足的报错。
+            val need = items.sumOf { it.sizeBytes }
+            if (need > 0L) {
+                val free = freeBytes(root)
+                if (need > free) {
+                    return@withLock Result.failure(
+                        IllegalStateException(
+                            "存储空间不足：需要 ${readSize(need)}，当前可用 ${readSize(free)}",
+                        ),
+                    )
+                }
+            }
             var done = 0
             var lastError: String? = null
             val added = mutableListOf<VaultEntry>()
@@ -474,7 +624,9 @@ class VaultRepo(
                     return@forEachIndexed
                 }
 
-                val stored = "v_${System.currentTimeMillis()}_${index}.bin"
+                // 密文名带一段随机串：只用「毫秒 + 批次序号」时，两次添加若落在同一毫秒
+                // 就会重名，加密输出会覆盖已有密文，两条索引指向同一个文件。
+                val stored = "v_${System.currentTimeMillis()}_${index}_${randomHex()}.bin"
                 val target = File(root, stored)
                 val ok = Crypto.encrypt(source, target) { p -> onProgress(index, items.size, p) }
                 if (!ok) {
@@ -496,7 +648,7 @@ class VaultRepo(
                 source.parentFile?.let { touchedDirs += it }
 
                 val entry = VaultEntry(
-                    id = System.currentTimeMillis() + index,
+                    id = nextId(),
                     title = item.title,
                     fileName = item.fileName,
                     originalPath = path,
@@ -519,11 +671,8 @@ class VaultRepo(
                 // 之前是整批结束才写一次：批量隐藏到一半（手机被杀、空间满、权限异常）
                 // 时，已经加密的文件在目录里、索引里却没有它们 —— 界面上既看不到、
                 // 也永远解不开，等于"文件丢了"。逐条落盘后，最坏情况也只是少藏几个。
-                runCatching {
-                    val next = _entries.value + entry
-                    entryStore.write(next)
-                    _entries.value = next
-                }.onFailure { android.util.Log.e("VaultRepo", "写入保险箱索引失败", it) }
+                runCatching { writeEntries(_entries.value + entry) }
+                    .onFailure { android.util.Log.e("VaultRepo", "写入保险箱索引失败", it) }
             }
             if (done == 0) {
                 Result.failure(IllegalStateException(lastError ?: "没有可移入的视频"))
@@ -542,18 +691,40 @@ class VaultRepo(
     }
 
     /** 移出保险箱：解密回原目录 */
-    suspend fun restore(entry: VaultEntry): Result<String> {
+    suspend fun restore(
+        entry: VaultEntry,
+        onProgress: (Float) -> Unit = {},
+    ): Result<String> {
         val restoredOut = mutableListOf<Pair<VaultEntry, String>>()
-        val result = withContext(Dispatchers.IO) {
-            mutex.withLock {
-                val path = restoreInternal(entry, restoredOut)
-                if (path != null) Result.success(path)
-                else Result.failure(
-                    IllegalStateException("移出失败：${lastRestoreError ?: "请检查存储空间与权限"}"),
-                )
+        // 与回收站同一条原则：对外只返回 Result，不抛异常。
+        // 移出是「先解密落盘、再删密文、最后写索引」，前两步成功时文件已经在原处了，
+        // 这时把索引写入异常抛给页面协程，用户看到的就是「移出成功但应用闪退」。
+        val result = try {
+            withContext(Dispatchers.IO) {
+                mutex.withLock {
+                    val path = restoreInternal(entry, restoredOut, onProgress)
+                    if (path != null) Result.success(path)
+                    else Result.failure(
+                        IllegalStateException("移出失败：${lastRestoreError ?: "请检查存储空间与权限"}"),
+                    )
+                }
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (t: Throwable) {
+            android.util.Log.e("VaultRepo", "移出失败：${entry.fileName}", t)
+            Result.failure(IllegalStateException(t.message ?: "移出失败，请重试"))
+        }
+        if (restoredOut.isNotEmpty()) {
+            // 文件已还原，历史写失败不该反向报错，更不能让异常逃到页面
+            try {
+                onRestored(restoredOut)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                android.util.Log.w("VaultRepo", "移出后回写历史失败", t)
             }
         }
-        if (restoredOut.isNotEmpty()) onRestored(restoredOut)
         return result
     }
 
@@ -564,6 +735,7 @@ class VaultRepo(
     private suspend fun restoreInternal(
         entry: VaultEntry,
         restoredOut: MutableList<Pair<VaultEntry, String>>,
+        onProgress: (Float) -> Unit = {},
     ): String? {
         lastRestoreError = null
         // 没解锁就没有数据密钥：这时候说"解密失败"会让人以为文件坏了，
@@ -578,7 +750,20 @@ class VaultRepo(
             return null
         }
 
-        val original = File(entry.originalPath)
+        // 认领回来的孤儿没有原路径（索引丢过、文件名也被随机化）：回落到公共 Movies，
+        // 至少把内容放回用户能看见的地方。留空会得到 File("") → parent 为 null →
+        // 解密结果落进保险箱自己的目录，等于把明文塞进加密目录，比直接失败更糟。
+        val original = if (entry.originalPath.isBlank()) {
+            @Suppress("DEPRECATION")
+            File(
+                android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_MOVIES,
+                ),
+                entry.fileName.ifBlank { entry.storedName },
+            )
+        } else {
+            File(entry.originalPath)
+        }
         val parent = original.parentFile
         val dir = if (parent != null && (parent.exists() || parent.mkdirs())) parent else root
         if (!dir.canWrite()) {
@@ -590,20 +775,45 @@ class VaultRepo(
         val target = if (original.exists()) FileOps.uniqueTarget(dir, entry.fileName)
         else File(dir, entry.fileName)
 
-        if (!Crypto.decrypt(source, target)) {
+        if (!Crypto.decrypt(source, target, onProgress)) {
             lastRestoreError = "解密失败：密钥与这个文件不匹配，或文件已损坏"
             runCatching { if (target.length() == 0L) target.delete() }
             return null
         }
         runCatching { source.delete() }
 
-        val next = _entries.value.filterNot { it.id == entry.id }
-        entryStore.write(next)
-        _entries.value = next
+        val next = _entries.value.filterNot { it.id == entry.id && it.storedName == entry.storedName }
+        writeEntries(next)
         FileOps.scan(context, target.absolutePath)
         restoredOut += entry to target.absolutePath
         return target.absolutePath
     }
+
+    /**
+     * 保险箱索引落盘 + 更新内存状态；**写失败不抛**。
+     *
+     * 与回收站同一条理由：移出/删除都是「先动密文文件、后记索引」，走到这里文件已经
+     * 处理完了，索引只是一份可重建的缓存。把它写成致命异常，用户看到的就是
+     * 「文件移出成功，然后应用闪退」。
+     */
+    private suspend fun writeEntries(next: List<VaultEntry>) {
+        runCatching { entryStore.write(next) }.onFailure {
+            android.util.Log.w("VaultRepo", "写入保险箱索引失败", it)
+        }
+        _entries.value = next
+    }
+
+    /**
+     * 门禁配置落盘；返回是否写成功，不抛异常。
+     *
+     * 与索引不同，门禁写失败**必须让用户知道**（密码没存住，下次就解不开保险箱），
+     * 但同样不能抛给页面协程 —— 那是闪退。所以统一改成布尔返回值，由调用方决定
+     * 是提示「保存失败」还是整体失败。
+     */
+    private suspend fun writeConfig(next: VaultConfig): Boolean =
+        runCatching { configStore.write(next) }.onFailure {
+            android.util.Log.e("VaultRepo", "写入保险箱配置失败", it)
+        }.isSuccess
 
     /** 彻底删除（不可恢复） */
     suspend fun deletePermanently(entry: VaultEntry) = deletePermanently(listOf(entry))
@@ -611,11 +821,12 @@ class VaultRepo(
     /** 多选彻底删除：同一把锁内完成删除与一次落盘 */
     suspend fun deletePermanently(entries: Collection<VaultEntry>) = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val ids = entries.mapTo(HashSet()) { it.id }
+            // 「id + 密文名」双条件：历史数据里可能有重复 id（1.0.4 及以前按毫秒发号），
+            // 只按 id 过滤会把另一条不相干的记录一起从索引里抹掉。
+            val keys = entries.mapTo(HashSet()) { it.id to it.storedName }
             entries.forEach { runCatching { fileOf(it).delete() } }
-            val next = _entries.value.filterNot { it.id in ids }
-            entryStore.write(next)
-            _entries.value = next
+            val next = _entries.value.filterNot { (it.id to it.storedName) in keys }
+            writeEntries(next)
         }
     }
 
@@ -642,7 +853,21 @@ class VaultRepo(
             playCache.mkdirs()
             // 清掉上一次的临时文件，避免缓存无限增长
             runCatching { playCache.listFiles()?.forEach { it.delete() } }
-            val target = File(playCache, entry.fileName)
+            val free = freeBytes(playCache)
+            if (entry.sizeBytes > 0L && entry.sizeBytes > free) {
+                lastPlaybackError =
+                    "存储空间不足：解密播放需要 ${readSize(entry.sizeBytes)}，可用 ${readSize(free)}"
+                return@withContext null
+            }
+            // 临时文件名不带原片名：这里虽然位于应用私有缓存，但清理工具、adb、
+            // 「文件管理」类应用都可能看到，原片名本身就是一条信息。
+            // 扩展名保留：部分解码器与字幕匹配仍会参考后缀。
+            val ext = entry.fileName.substringAfterLast('.', "")
+                .takeIf { it.isNotBlank() && it.length <= 5 && it.all { c -> c.isLetterOrDigit() } }
+            val target = File(
+                playCache,
+                "v_${randomHex()}${randomHex()}" + if (ext != null) ".$ext" else "",
+            )
             if (Crypto.decrypt(source, target, onProgress)) {
                 target
             } else {

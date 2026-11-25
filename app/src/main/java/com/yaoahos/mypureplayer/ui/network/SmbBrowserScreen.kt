@@ -94,6 +94,7 @@ import com.yaoahos.mypureplayer.ui.components.PlaylistTargetSheet
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.PullRefreshBox
+import com.yaoahos.mypureplayer.ui.components.ScrollableFill
 import com.yaoahos.mypureplayer.ui.components.SearchField
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
@@ -136,7 +137,7 @@ fun SmbBrowserScreen(
             else Notice.error("「$name」不存在或没有新增视频")
         }
     }
-    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = Graph.settings.currentOrNull() ?: AppSettings())
     // 「删除历史」按选中视频是否有观看记录决定是否置灰
     val history by Graph.history.history.collectAsStateWithLifecycle()
     var server by remember(serverId) { mutableStateOf(Graph.servers.byId(serverId)) }
@@ -237,7 +238,16 @@ fun SmbBrowserScreen(
     // 网络抖动被误判后，之后再进同一个文件夹也永远只剩图标。
     LaunchedEffect(entries, path, activeServer?.id) {
         val srv = activeServer ?: return@LaunchedEffect
-        Thumbnails.allowRetry(context, SmbClient.toVideoItems(srv, entries, path))
+        val items = SmbClient.toVideoItems(srv, entries, path)
+        // 逐条算 key（MD5）+ 删失败标记都是文件操作，目录里几百个视频就是上千次
+        // 系统调用，占着主线程进目录会明显掉帧
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            Thumbnails.allowRetry(context, items)
+        }
+        // 首屏之外的封面在空闲时预热：滚下去时直接命中缓存，
+        // 不再出现「每翻一屏都要等十几秒才长图」。
+        // 跳过前 12 张 —— 它们就是首屏，卡片自己会请求，预热只会和它们抢许可。
+        Thumbnails.prefetch(context, items.drop(12).take(24), srv)
     }
 
     val sortKey = remember(sortName) { runCatching { SortKey.valueOf(sortName) }.getOrDefault(SortKey.NAME) }
@@ -358,7 +368,8 @@ fun SmbBrowserScreen(
                             style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f),
                         )
-                        androidx.compose.material3.Button(
+                        com.yaoahos.mypureplayer.ui.components.GlassButton(
+                            text = "加入列表",
                             onClick = {
                                 // 选中的视频 + 选中文件夹的直属视频（不递归），按 id 去重。
                                 // 这里先把条目取出来，目标列表由随后弹出的选择器决定。
@@ -375,9 +386,7 @@ fun SmbBrowserScreen(
                                 }
                             },
                             enabled = selectedCount > 0,
-                        ) {
-                            Text("加入列表")
-                        }
+                        )
                     }
                 }
             } else if (selection.active) {
@@ -471,6 +480,9 @@ fun SmbBrowserScreen(
         PullRefreshBox(
             isRefreshing = refreshing,
             onRefresh = { pullReload = true; reloadKey++ },
+            // 刷新失败时页面已经写明「无法打开这个位置」，再弹一句「已刷新」是自相矛盾；
+            // 成功才提示，失败让错误态自己说话。
+            doneText = { if (error != null) null else "已刷新" },
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
             Column(Modifier.fillMaxSize()) {
@@ -483,15 +495,16 @@ fun SmbBrowserScreen(
                     )
                 }
                 when {
-                    error != null -> EmptyState(
-                        icon = Icons.Rounded.Folder,
-                        title = "无法打开这个位置",
-                        message = error ?: "",
-                        // 首次进目录失败时不能只有一行错误文字：给一个明确的行动出口，
-                        // 而不是让用户去发现隐藏的下拉刷新手势
-                        actionLabel = "重试",
-                        onAction = { pullReload = false; reloadKey++ },
-                    )
+                    error != null -> ScrollableFill {
+                        EmptyState(
+                            icon = Icons.Rounded.Folder,
+                            title = "无法打开这个位置",
+                            // 不给「重试」按钮：下拉刷新做的是同一件事，右下角/中间再摆一颗
+                            // 按钮只是把同一个动作写两遍。代价是必须把「可以下拉」说出来，
+                            // 否则错误页看起来像一条死路。
+                            message = "${error.orEmpty().trimEnd()}\n\n下拉可以重新尝试",
+                        )
+                    }
 
                     // 无缓存的首开/进目录：内容区给一个居中转圈。
                     // 下拉刷新的转圈在顶部弧线，这里用 refreshing 把它让开，
@@ -501,11 +514,15 @@ fun SmbBrowserScreen(
                             CircularProgressIndicator()
                         }
 
-                    visibleVideos.isEmpty() && filteredFolders.isEmpty() -> EmptyState(
-                        icon = Icons.Rounded.Movie,
-                        title = "这里没有视频",
-                        message = "下拉可以重新加载；只显示视频文件与文件夹。",
-                    )
+                    visibleVideos.isEmpty() && filteredFolders.isEmpty() -> ScrollableFill {
+                        // 文案承诺了「下拉可以重新加载」，那就必须真的能下拉：
+                        // 纯 Column 不是滚动节点，nestedScroll 收不到手势（这里原来就是断的）
+                        EmptyState(
+                            icon = Icons.Rounded.Movie,
+                            title = "这里没有视频",
+                            message = "下拉可以重新加载；只显示视频文件与文件夹。",
+                        )
+                    }
 
                     // 加入播放列表模式：固定用列表形式（不受浏览页的宫格设置影响）。
                     // 文件夹左侧=进入目录、右侧复选框=勾选整个目录的直属视频；

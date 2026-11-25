@@ -71,22 +71,23 @@ fun ConfirmDialog(
     }
     AlertDialog(
         shape = RoundedCornerShape(26.dp),
-        // 玻璃底：与全站卡片同一套材质，弹窗压住内容时仍透出一点页面
-        containerColor = appGlass().panelStrong,
+        // 玻璃底：与全站弹窗同一套渐变面板；容器色必须透明，否则会盖住这层渐变
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         tonalElevation = 0.dp,
-        modifier = modifier,
+        modifier = modifier.alertDialogGlassSurface(),
         onDismissRequest = onDismiss,
         title = { Text(title, style = MaterialTheme.typography.headlineSmall) },
         text = { Text(message) },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text(
-                    confirmText,
-                    color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                )
-            }
+            GlassButton(
+                text = confirmText,
+                onClick = onConfirm,
+                tone = if (destructive) GlassButtonTone.Danger else GlassButtonTone.Accent,
+            )
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(dismissText) } },
+        dismissButton = {
+            GlassButton(text = dismissText, onClick = onDismiss, tone = GlassButtonTone.Neutral)
+        },
     )
 }
 
@@ -145,16 +146,18 @@ private fun ConfirmBody(
                 Spacer(Modifier.height(18.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 ) {
-                    TextButton(onClick = { dismiss.value() }) { Text(dismissText) }
-                    TextButton(onClick = onConfirm) {
-                        Text(
-                            confirmText,
-                            color = if (destructive) MaterialTheme.colorScheme.error
-                            else MaterialTheme.colorScheme.primary,
-                        )
-                    }
+                    GlassButton(
+                        text = dismissText,
+                        onClick = { dismiss.value() },
+                        tone = GlassButtonTone.Neutral,
+                    )
+                    GlassButton(
+                        text = confirmText,
+                        onClick = onConfirm,
+                        tone = if (destructive) GlassButtonTone.Danger else GlassButtonTone.Accent,
+                    )
                 }
             }
         }

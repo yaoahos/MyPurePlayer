@@ -322,45 +322,112 @@ object Crypto {
     }.getOrNull()
 
     // ------------------------------------------------------------ 文件加解密
+    //
+    // 1.0.0 ~ 1.0.4：整文件 AES-256-CBC + 末尾 32 字节 HMAC（"MV3"）。
+    // CBC 是链式模式，第 N 块必须从第 1 块算起，所以播放第 60% 的位置也得先把
+    // 前 60% 解完 —— 保险箱里的视频因此只能先整体解密到缓存再播（等几十秒、占双倍空间）。
+    //
+    // 1.0.5 起改成 MV4：定长分块 + 每块独立 AES-GCM。每块的 nonce 由 baseNonce 和
+    // 块序号拼出，因此可以任意跳读、单独校验；1MB 一块时 1.5GB 的视频就是 1500 个
+    // 独立块，拖动进度条只需要解目标那一块。
+    //
+    // 布局：[3B "MV4"][12B baseNonce][4B blockSize][8B plainLength] + 若干「密文 + 16B tag」
+    //
+    // MV3 仍然可读（老文件不迁移；用户把视频移出再重新加入就自然升级成 MV4）。
 
-    /** 加密 [src] 到 [dst]，带 HMAC 完整性校验（v3 格式） */
+    private const val MAGIC_V4 = "MV4"
+    private const val BLOCK_SIZE = 1024 * 1024
+    private const val GCM_TAG = 16
+    private const val V4_HEADER = 3 + 12 + 4 + 8
+
+    /** 密文格式探针的结果 */
+    sealed class FileFormat {
+        /** 1.0.0 ~ 1.0.4：整文件 CBC + 末尾 HMAC */
+        object Mv3 : FileFormat()
+
+        /** 1.0.5 起：分块 GCM，可随机读 */
+        class Mv4(
+            val baseNonce: ByteArray,
+            val blockSize: Int,
+            val plainLength: Long,
+        ) : FileFormat()
+    }
+
+    /**
+     * 读密文开头判断格式。
+     *
+     * 只认正式版写出过的两种：MV3 与 MV4。开发期短暂存在过的「无 magic」和
+     * 「HMAC 算在明文上」两种变体从未随正式版发布，已删除对应兼容分支 ——
+     * 留着只会让每次解密多走两次无用的 HMAC 计算，也让格式判断变得含糊。
+     */
+    fun probe(src: File): FileFormat? = runCatching {
+        java.io.RandomAccessFile(src, "r").use { raf ->
+            val head = ByteArray(3)
+            if (raf.read(head) != 3) return null
+            when (String(head, Charsets.US_ASCII)) {
+                MAGIC -> FileFormat.Mv3
+                MAGIC_V4 -> {
+                    val rest = ByteArray(12 + 4 + 8)
+                    var read = 0
+                    while (read < rest.size) {
+                        val n = raf.read(rest, read, rest.size - read)
+                        if (n <= 0) return null
+                        read += n
+                    }
+                    val blockSize = readIntBE(rest, 12)
+                    val plainLength = readLongBE(rest, 16)
+                    if (blockSize !in 64 * 1024..16 * 1024 * 1024 || plainLength < 0) return null
+                    FileFormat.Mv4(rest.copyOfRange(0, 12), blockSize, plainLength)
+                }
+                else -> null
+            }
+        }
+    }.getOrNull()
+
+    /** 加密 [src] 到 [dst]（MV4 分块格式） */
     fun encrypt(src: File, dst: File, onProgress: (Float) -> Unit = {}): Boolean = runCatching {
         val key = dataKey ?: throw IllegalStateException("保险箱密钥尚未初始化")
-        val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        val iv = cipher.iv
-        val mac = newMac(key)
-        val magic = MAGIC.toByteArray(Charsets.US_ASCII)
+        val plainLength = src.length()
+        val baseNonce = ByteArray(12)
+        // 后 4 字节留给块序号，前 8 字节随机：同一把密钥下还有 2^64 的空间
+        val rnd = ByteArray(8)
+        SecureRandom().nextBytes(rnd)
+        System.arraycopy(rnd, 0, baseNonce, 0, 8)
 
         dst.parentFile?.mkdirs()
         val tmp = File(dst.parentFile, "${dst.name}.tmp")
         tmp.outputStream().use { out ->
-            out.write(magic)
-            out.write(iv)
-            mac.update(magic)
-            mac.update(iv)
+            out.write(MAGIC_V4.toByteArray(Charsets.US_ASCII))
+            out.write(baseNonce)
+            out.write(intBE(BLOCK_SIZE))
+            out.write(longBE(plainLength))
+            if (plainLength == 0L) return@use
             src.inputStream().use { input ->
-                val buffer = ByteArray(BUFFER)
-                val total = src.length().coerceAtLeast(1L)
+                val buffer = ByteArray(BLOCK_SIZE)
+                var index = 0
                 var done = 0L
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    done += read
-                    val outBytes = cipher.update(buffer, 0, read)
-                    if (outBytes != null && outBytes.isNotEmpty()) {
-                        out.write(outBytes)
-                        mac.update(outBytes)
+                while (done < plainLength) {
+                    val want = minOf(BLOCK_SIZE.toLong(), plainLength - done).toInt()
+                    var read = 0
+                    while (read < want) {
+                        val n = input.read(buffer, read, want - read)
+                        if (n < 0) break
+                        read += n
                     }
-                    onProgress((done.toFloat() / total).coerceIn(0f, 1f))
+                    if (read <= 0) break
+                    val cipher = Cipher.getInstance(WRAP_TRANSFORM)
+                    cipher.init(
+                        Cipher.ENCRYPT_MODE,
+                        key,
+                        GCMParameterSpec(128, nonceFor(baseNonce, index)),
+                    )
+                    // GCM 的 doFinal 输出 = 密文 + 16 字节 tag，把 tag 直接跟在块后面
+                    out.write(cipher.doFinal(buffer, 0, read))
+                    done += read
+                    index++
+                    onProgress((done.toFloat() / plainLength.coerceAtLeast(1L)).coerceIn(0f, 1f))
                 }
             }
-            val tail = cipher.doFinal()
-            if (tail != null && tail.isNotEmpty()) {
-                out.write(tail)
-                mac.update(tail)
-            }
-            out.write(mac.doFinal())
         }
         atomicReplace(tmp, dst)
         true
@@ -370,9 +437,73 @@ object Crypto {
         false
     }
 
-    /** 解密 [src] 到 [dst]，自动识别 v3（带 HMAC）与旧格式（无校验） */
+    /** 解密 [src] 到 [dst]，MV3 / MV4 都支持 */
     fun decrypt(src: File, dst: File, onProgress: (Float) -> Unit = {}): Boolean = runCatching {
         val key = dataKey ?: throw IllegalStateException("保险箱密钥尚未初始化")
+        when (val format = probe(src)) {
+            is FileFormat.Mv4 -> decryptMv4(src, dst, format, key, onProgress)
+            FileFormat.Mv3 -> decryptMv3(src, dst, key, onProgress)
+            null -> throw IllegalStateException("无法识别的加密文件格式")
+        }
+        true
+    }.getOrElse { t ->
+        Log.e(TAG, "decrypt failed: ${src.name}", t)
+        runCatching { dst.delete() }
+        false
+    }
+
+    /** MV4 顺序解密（移出保险箱、或老播放路径需要完整明文时用） */
+    private fun decryptMv4(
+        src: File,
+        dst: File,
+        format: FileFormat.Mv4,
+        key: SecretKeySpec,
+        onProgress: (Float) -> Unit,
+    ) {
+        val blockSize = format.blockSize
+        val plainLength = format.plainLength
+        val total = plainLength.coerceAtLeast(1L)
+        dst.parentFile?.mkdirs()
+        val tmp = File(dst.parentFile, "${dst.name}.tmp")
+        java.io.RandomAccessFile(src, "r").use { raf ->
+            raf.seek(V4_HEADER.toLong())
+            tmp.outputStream().use { out ->
+                val buffer = ByteArray(blockSize + GCM_TAG)
+                var index = 0
+                var done = 0L
+                while (done < plainLength) {
+                    val plainWant = minOf(blockSize.toLong(), plainLength - done).toInt()
+                    val readLen = plainWant + GCM_TAG
+                    var read = 0
+                    while (read < readLen) {
+                        val n = raf.read(buffer, read, readLen - read)
+                        if (n <= 0) throw IllegalStateException("密文不完整")
+                        read += n
+                    }
+                    val cipher = Cipher.getInstance(WRAP_TRANSFORM)
+                    cipher.init(
+                        Cipher.DECRYPT_MODE,
+                        key,
+                        GCMParameterSpec(128, nonceFor(format.baseNonce, index)),
+                    )
+                    // GCM 会校验 tag：校验失败抛 AEADBadTagException，由外层转成「解密失败」
+                    out.write(cipher.doFinal(buffer, 0, readLen))
+                    done += plainWant
+                    index++
+                    onProgress((done.toFloat() / total).coerceIn(0f, 1f))
+                }
+            }
+        }
+        atomicReplace(tmp, dst)
+    }
+
+    /** MV3 顺序解密：整文件 CBC + 末尾 HMAC（1.0.0 ~ 1.0.4 写出的文件） */
+    private fun decryptMv3(
+        src: File,
+        dst: File,
+        key: SecretKeySpec,
+        onProgress: (Float) -> Unit,
+    ) {
         src.inputStream().use { input ->
             val header = ByteArray(3)
             var off = 0
@@ -381,7 +512,9 @@ object Crypto {
                 if (read <= 0) throw IllegalStateException("密文头不完整")
                 off += read
             }
-            val isV3 = String(header, Charsets.US_ASCII) == MAGIC
+            if (String(header, Charsets.US_ASCII) != MAGIC) {
+                throw IllegalStateException("无法识别的加密文件格式")
+            }
             val iv = ByteArray(16)
             off = 0
             while (off < 16) {
@@ -392,17 +525,9 @@ object Crypto {
             val cipher = Cipher.getInstance(TRANSFORM)
             cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(iv))
 
-            val mac = if (isV3) {
-                newMac(key).apply { update(header); update(iv) }
-            } else null
-            // 兼容分支：历史上有一段版本把校验值算在**明文**上，这样写出的密文
-            // 用现在这版（校验密文）去打，永远对不上 —— 用户那边的文件会全部"解密失败"。
-            // 两份摘要同时算，任一命中即接受：新文件走密文校验，旧文件仍能打开。
-            val legacyMac = if (isV3) {
-                newMac(key).apply { update(header); update(iv) }
-            } else null
+            val mac = newMac(key).apply { update(header); update(iv) }
 
-            val totalLen = src.length() - (if (isV3) 3L + 16L + 32L else 16L)
+            val totalLen = src.length() - (3L + 16L + 32L)
             val total = totalLen.coerceAtLeast(1L)
             var done = 0L
             dst.parentFile?.mkdirs()
@@ -414,51 +539,158 @@ object Crypto {
                     val read = input.read(buffer, 0, want)
                     if (read <= 0) break
                     done += read
-                    // 校验值必须算在**密文**上（Encrypt-then-MAC）。
-                    //
-                    // 这里曾经写的是 `mac.update(outBytes)` —— 那是解密后的明文。
-                    // 加密时算的是密文、解密时算的是明文，两边永远不可能相等，
-                    // 于是**每一个**保险箱文件都"校验失败"，视频既打不开也移不出来。
-                    // 必须先对刚读到的密文做 MAC，再拿去解密。
-                    mac?.update(buffer, 0, read)
+                    // 校验值算在密文上（Encrypt-then-MAC）：必须先 MAC 再解密
+                    mac.update(buffer, 0, read)
                     val outBytes = cipher.update(buffer, 0, read)
-                    if (outBytes != null && outBytes.isNotEmpty()) {
-                        out.write(outBytes)
-                        legacyMac?.update(outBytes)
-                    }
+                    if (outBytes != null && outBytes.isNotEmpty()) out.write(outBytes)
                     onProgress((done.toFloat() / total).coerceIn(0f, 1f))
                 }
-                // 收尾：CBC 去掉填充后的最后一段是明文，不参与校验
                 val tail = cipher.doFinal()
-                if (tail != null && tail.isNotEmpty()) {
-                    out.write(tail)
-                    legacyMac?.update(tail)
+                if (tail != null && tail.isNotEmpty()) out.write(tail)
+                val stored = ByteArray(32)
+                var s = 0
+                while (s < 32) {
+                    val r = input.read(stored, s, 32 - s)
+                    if (r <= 0) throw IllegalStateException("密文校验值不完整")
+                    s += r
                 }
-                if (mac != null) {
-                    val stored = ByteArray(32)
-                    var s = 0
-                    while (s < 32) {
-                        val r = input.read(stored, s, 32 - s)
-                        if (r <= 0) throw IllegalStateException("密文校验值不完整")
-                        s += r
-                    }
-                    val fresh = mac.doFinal()
-                    if (!MessageDigest.isEqual(fresh, stored)) {
-                        val legacy = legacyMac?.doFinal()
-                        if (legacy == null || !MessageDigest.isEqual(legacy, stored)) {
-                            throw IllegalStateException("文件校验失败：内容可能已损坏或被篡改")
-                        }
-                        Log.w(TAG, "decrypt ${src.name} 命中旧版明文校验值（兼容模式）")
-                    }
+                if (!MessageDigest.isEqual(mac.doFinal(), stored)) {
+                    throw IllegalStateException("文件校验失败：内容可能已损坏或被篡改")
                 }
             }
             atomicReplace(tmp, dst)
         }
-        true
-    }.getOrElse { t ->
-        Log.e(TAG, "decrypt failed: ${src.name}", t)
-        runCatching { dst.delete() }
-        false
+    }
+
+    /**
+     * MV4 密文的随机读取器：按需解密单个块，缓存最近一块。
+     *
+     * 播放器每读一段就调一次 [read]，顺序播放时命中缓存、只有换块才真正解密；
+     * 拖动进度条时直接跳到目标块解（1MB 的 GCM 解密在硬件加速下是毫秒级），
+     * 不需要把前面几十万个块都过一遍。
+     */
+    class BlockReader(private val file: File, private val key: SecretKeySpec) : java.io.Closeable {
+        private val raf = java.io.RandomAccessFile(file, "r")
+        private val blockSize: Int
+        private val plainLength: Long
+        private val baseNonce: ByteArray
+        private var cachedIndex = -1
+        private var cached: ByteArray? = null
+
+        init {
+            val head = ByteArray(V4_HEADER)
+            var read = 0
+            while (read < head.size) {
+                val n = raf.read(head, read, head.size - read)
+                if (n <= 0) {
+                    raf.close()
+                    throw java.io.IOException("保险箱文件头不完整")
+                }
+                read += n
+            }
+            if (String(head, 0, 3, Charsets.US_ASCII) != MAGIC_V4) {
+                raf.close()
+                throw java.io.IOException("不是可随机读取的保险箱文件")
+            }
+            baseNonce = head.copyOfRange(3, 15)
+            blockSize = readIntBE(head, 15)
+            plainLength = readLongBE(head, 19)
+            if (blockSize !in 64 * 1024..16 * 1024 * 1024 || plainLength < 0) {
+                raf.close()
+                throw java.io.IOException("保险箱文件头损坏")
+            }
+        }
+
+        /** 明文总长度（解密后的大小） */
+        fun plainLength(): Long = plainLength
+
+        /**
+         * 从明文偏移 [plainOffset] 读取至多 [length] 字节到 [buffer]。
+         * 返回实际读到的字节数；已在末尾则返回 -1。
+         */
+        fun read(plainOffset: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+            if (plainOffset >= plainLength) return -1
+            val want = minOf(length.toLong(), plainLength - plainOffset).toInt()
+            var copied = 0
+            var pos = plainOffset
+            while (copied < want) {
+                val index = (pos / blockSize).toInt()
+                val inBlock = (pos % blockSize).toInt()
+                val block = blockAt(index) ?: break
+                val n = minOf(block.size - inBlock, want - copied)
+                if (n <= 0) break
+                System.arraycopy(block, inBlock, buffer, offset + copied, n)
+                copied += n
+                pos += n
+            }
+            return if (copied == 0) -1 else copied
+        }
+
+        private fun blockAt(index: Int): ByteArray? {
+            cached?.let { if (cachedIndex == index) return it }
+            val plainStart = index.toLong() * blockSize
+            if (plainStart >= plainLength) return null
+            val plainLen = minOf(blockSize.toLong(), plainLength - plainStart).toInt()
+            val offset = V4_HEADER.toLong() + index.toLong() * (blockSize + GCM_TAG)
+            val buf = ByteArray(plainLen + GCM_TAG)
+            raf.seek(offset)
+            var read = 0
+            while (read < buf.size) {
+                val n = raf.read(buf, read, buf.size - read)
+                if (n <= 0) return null
+                read += n
+            }
+            val cipher = Cipher.getInstance(WRAP_TRANSFORM)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                key,
+                GCMParameterSpec(128, nonceFor(baseNonce, index)),
+            )
+            val plain = cipher.doFinal(buf)
+            cached = plain
+            cachedIndex = index
+            return plain
+        }
+
+        override fun close() {
+            runCatching { raf.close() }
+            cached = null
+        }
+    }
+
+    /** 块序号拼进 baseNonce 的后 4 字节（大端），保证同一文件内每块 nonce 唯一 */
+    private fun nonceFor(base: ByteArray, index: Int): ByteArray {
+        val nonce = base.copyOf(12)
+        nonce[8] = (index ushr 24).toByte()
+        nonce[9] = (index ushr 16).toByte()
+        nonce[10] = (index ushr 8).toByte()
+        nonce[11] = index.toByte()
+        return nonce
+    }
+
+    private fun intBE(value: Int): ByteArray = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
+
+    private fun longBE(value: Long): ByteArray = ByteArray(8) { i ->
+        (value ushr (56 - i * 8)).toByte()
+    }
+
+    private fun readIntBE(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xff) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 8) or
+            (bytes[offset + 3].toInt() and 0xff)
+
+    private fun readLongBE(bytes: ByteArray, offset: Int): Long {
+        var value = 0L
+        for (i in 0 until 8) {
+            value = (value shl 8) or (bytes[offset + i].toLong() and 0xff)
+        }
+        return value
     }
 
     private fun newMac(key: SecretKeySpec): Mac {

@@ -1,5 +1,8 @@
 package com.yaoahos.mypureplayer.ui.more
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassTextField
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import androidx.activity.compose.BackHandler
 
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -40,7 +43,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -79,6 +81,7 @@ import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
 import com.yaoahos.mypureplayer.ui.components.SelectionBadge
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
@@ -382,7 +385,8 @@ private fun StreamInfoDialog(stream: StreamItem, onDismiss: () -> Unit) {
     val added = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(stream.id))
     AlertDialog(
         shape = RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
         title = { Text("串流详情") },
@@ -394,7 +398,7 @@ private fun StreamInfoDialog(stream: StreamItem, onDismiss: () -> Unit) {
                 InfoRow("添加时间", added)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { GlassDialogButton(onClick = onDismiss) { Text("关闭") } },
     )
 }
 
@@ -429,34 +433,32 @@ private fun StreamEditorDialog(
 
     AlertDialog(
         shape = RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
         title = { Text(if (editing) "编辑串流" else "新建串流") },
         text = {
             Column {
-                OutlinedTextField(
+                GlassTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("名称") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    label = "名称",
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
+                GlassTextField(
                     value = url,
                     onValueChange = { url = it },
-                    label = { Text("地址") },
-                    placeholder = { Text("http:// 或 rtsp://") },
-                    singleLine = true,
+                    label = "地址",
+                    placeholder = "http:// 或 rtsp://",
                     // 地址栏用 URI 键盘且键盘 Done 直接保存，不用手动收起键盘再点按钮
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,
                         imeAction = ImeAction.Done,
                     ),
                     keyboardActions = KeyboardActions(onDone = { submit() }),
-                    shape = RoundedCornerShape(14.dp),
+                    isError = error != null,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 error?.let {
@@ -470,12 +472,12 @@ private fun StreamEditorDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { submit() }) {
+            GlassDialogButton(onClick = { submit() }, tone = GlassButtonTone.Accent) {
                 Text(if (editing) "保存" else "保存并播放")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            GlassDialogButton(onClick = onDismiss) { Text("取消") }
         },
     )
 }

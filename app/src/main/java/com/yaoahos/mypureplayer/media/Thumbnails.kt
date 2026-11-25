@@ -230,6 +230,10 @@ object Thumbnails {
     private val workScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val inflight = ConcurrentHashMap<String, Deferred<Bitmap?>>()
 
+    /** 正在跑的预热任务：换目录时先取消旧的，避免两条预热链同时抢连接 */
+    @Volatile
+    private var prefetchJob: kotlinx.coroutines.Job? = null
+
     /**
      * 本次运行里确认抽不出帧的视频：只显示图标，不再反复尝试拖慢列表。
      * （失败两次才落盘标记，见 [recordFailure]）
@@ -464,6 +468,62 @@ object Thumbnails {
         if (!file.exists() || file.length() == 0L) return null
         val width = if (item.source == MediaSource.SMB) MAX_WIDTH_REMOTE else MAX_WIDTH_LOCAL
         return runCatching { decodeSampled(file, width) }.getOrNull()?.also { memory.put(key, it) }
+    }
+
+    /**
+     * 空闲预热：把「下一屏」的封面提前抓好，滚动下去时直接命中缓存。
+     *
+     * 为什么不在进入目录时就全量抽：一屏十几张已经把 2 路并发占满，
+     * 第一屏自己都还没出图，再往里塞只会让首屏更慢。
+     *
+     * 所以这里做三件事：
+     *  1. 先等 1.5 秒，让首屏可见卡片把自己的请求发出去；
+     *  2. 逐张处理，且**只在有闲余许可时**动手（[Semaphore.tryAcquire]）——
+     *     拿不到许可说明可见卡片正在跑或排队，这一轮直接让路，绝不插队；
+     *  3. 单个文件夹的变化会重新触发一次，新任务先取消旧任务，不会叠加两条预热链。
+     *
+     * 预热的图不推 [thumbVersion]：目标条目还在屏幕外，没有卡片在等它；
+     * 等用户滚过去，[load] 直接命中内存/磁盘缓存，不产生任何唤醒风暴。
+     */
+    fun prefetch(context: Context, items: List<VideoItem>, server: SmbServer?) {
+        if (items.isEmpty()) return
+        val app = context.applicationContext
+        prefetchJob?.cancel()
+        prefetchJob = workScope.launch {
+            delay(1_500L)
+            for (item in items) {
+                if (remotePaused) return@launch
+                if (item.source != MediaSource.SMB) continue
+                val key = keyOf(item)
+                if (memory.get(key) != null) continue
+                val file = File(cacheDir(app), "$key.$CACHE_VERSION.jpg")
+                if (file.exists() && file.length() > 0L) continue
+                if (inflight.containsKey(key)) continue
+                if (unsupported.contains(item.id) || thumbMarkedDead(app, item)) continue
+                // 许可被可见卡片占着：这一张先跳过，不排队、不等待
+                if (!remoteSemaphore.tryAcquire()) continue
+                try {
+                    val frame = withTimeoutOrNull(15_000L) {
+                        runCatching { extract(app, item, server) }.getOrNull()
+                    }
+                    if (frame != null) {
+                        memory.put(key, frame)
+                        primeArtwork(app, item, frame)
+                        runCatching {
+                            file.parentFile?.mkdirs()
+                            FileOutputStream(file).use { out ->
+                                frame.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY_REMOTE, out)
+                            }
+                        }
+                    }
+                } finally {
+                    remoteSemaphore.release()
+                }
+                // 每张之间留一点空档：连续打满会把 SMB 往返延迟堆起来，
+                // 用户此时往下滚，可见卡片反而要排在预热后面。
+                delay(80L)
+            }
+        }
     }
 
     suspend fun load(context: Context, item: VideoItem, server: SmbServer? = null): Bitmap? {

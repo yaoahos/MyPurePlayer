@@ -70,8 +70,13 @@ fun PullRefreshBox(
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
-    /** 完成提示文案；传 null 表示这一轮不提示 */
-    doneText: String? = "已刷新",
+    /**
+     * 完成提示文案，**在刷新结束时求值**：返回 null 表示这一轮不提示。
+     *
+     * 为什么要延迟求值：刷新有可能是失败的（SMB 目录重新列失败时页面已经写明
+     * 「无法打开这个位置」），固定写「已刷新」会与错误态自相矛盾。
+     */
+    doneText: () -> String? = { "已刷新" },
     content: @Composable BoxScope.() -> Unit,
 ) {
     val state = rememberPullToRefreshState()
@@ -112,7 +117,7 @@ fun PullRefreshBox(
                 }
                 // 3) 收圈与提示同一帧提交
                 roundRunning = false
-                val text = currentDoneText
+                val text = currentDoneText()
                 if (text != null) {
                     if (timedOut) Notice.warn("刷新超时，请稍后再试") else Notice.success(text)
                 }

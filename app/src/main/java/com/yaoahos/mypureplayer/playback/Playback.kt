@@ -711,7 +711,10 @@ object Playback {
         // 换新列表（例如从另一个文件夹打开视频）时，播放页里临时选的顺序不再适用
         sessionPlayMode = null
         _state.update { it.copy(playMode = effectivePlayMode()) }
-        _queue.value = items
+        // 去重兜底：队列 id 直接当播放列表 Lazy 的 key，重复值会抛
+        // "Key ... was already used" 把播放页带走，而且队列会落盘、重启后照样崩。
+        // 正常入口（addToQueue）已经保证唯一，这里防的是外部数据（备份恢复、旧 json）。
+        _queue.value = if (items.size <= 1) items else items.distinctBy { it.id }
         persistQueue()
     }
 
@@ -859,7 +862,14 @@ object Playback {
     private fun persistQueue() {
         val repo = queueRepo ?: return
         val items = _queue.value
-        scope.launch { repo.save(items) }
+        // 写盘失败不能完全静默：内存队列已经变了、磁盘没变，杀进程回来就是旧内容。
+        // 不弹提示（队列变动很频繁，浮层会盖住画面），但必须留日志，
+        // 否则「加了 20 个视频，第二天变回旧的」根本无从查起。
+        scope.launch {
+            runCatching { repo.save(items) }.onFailure {
+                Log.w(TAG, "播放队列保存失败（${items.size} 项）", it)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 播放内核
@@ -1045,6 +1055,17 @@ object Playback {
                     isNetwork = true
                 }
                 MediaSource.LOCAL -> {
+                    // 保险箱视频：localPath 指向的是密文（`.bin`），绝对不能当普通文件
+                    // 交给解码器。用 vault:// 交给 VaultDataSource 按块解密，播放器就能
+                    // 边读边解、拖动秒响应，也不必先解密一整份到缓存。
+                    // 这条分支必须在投屏判断之前：投屏是把 URL 推给电视，
+                    // 电视那头没有密钥，推出去的只会是密文。
+                    val vaultPath = item.localPath
+                    if (item.id.startsWith("vault:") && vaultPath != null) {
+                        contentUri = Uri.Builder().scheme("vault").path(vaultPath).build()
+                        isNetwork = false
+                        return buildMediaItemWithSubtitles(contentUri, item, false)
+                    }
                     // 投屏时电视机访问不到本机回环/content，改走局域网 HTTP
                     if (_state.value.rendererName.isNotBlank()) {
                         LocalStreamServer.lanUrlFor(app, item)?.let { lanUrl ->
@@ -1132,6 +1153,15 @@ object Playback {
         if (!file.isFile) return path
         val ext = Formats.extensionOf(file.name)
         if (ext !in setOf("srt", "ass", "ssa", "vtt")) return path
+        // 先按「路径 + 修改时间 + 大小」算出缓存名，命中就直接返回 ——
+        // 原来不管命中与否都先把整个字幕读进内存再算摘要，重看同一部片子
+        // 每次起播都要白读几百 KB（SMB 缓存下来的字幕更慢）。
+        val key = "$path|${file.lastModified()}|${file.length()}"
+        val digest = MessageDigest.getInstance("SHA-1")
+            .digest(key.toByteArray()).joinToString("") { "%02x".format(it) }
+        val cached = File(app.cacheDir, "subs/utf8_$digest.$ext")
+        if (cached.exists() && cached.length() > 0L) return cached.absolutePath
+
         val bytes = runCatching { file.readBytes() }.getOrNull() ?: return path
         if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() &&
             bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()
@@ -1152,11 +1182,6 @@ object Playback {
                     .getOrElse { return path }
             }
         }
-        val key = "$path|${file.lastModified()}|${file.length()}"
-        val digest = MessageDigest.getInstance("SHA-1")
-            .digest(key.toByteArray()).joinToString("") { "%02x".format(it) }
-        val cached = File(app.cacheDir, "subs/utf8_$digest.$ext")
-        if (cached.exists() && cached.length() > 0L) return cached.absolutePath
         return runCatching {
             cached.parentFile?.mkdirs()
             cached.writeBytes(text.toByteArray(Charsets.UTF_8))
@@ -1185,19 +1210,41 @@ object Playback {
 
     private data class SubtitleChoice(val target: String, val name: String)
 
+    /**
+     * 目录内字幕文件的缓存（目录路径 → 扫描时刻与文件名列表）。
+     *
+     * [subtitleChoiceFor] 每次起播都要对整个目录 `listFiles()` 再逐个 `canRead()`，
+     * 全是系统调用；片库目录动辄几千个文件，点下视频到起播之间就有一段说不清的空档。
+     * 同一目录连播（下一集、重看）完全没必要重扫，缓存 60 秒即可 ——
+     * 代价是新丢进目录的字幕最多晚一分钟被认出来。命中判断只做字符串匹配，仍然是即时的。
+     */
+    private val subtitleFileCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<String>>>()
+
+    private fun subtitleFilesIn(dir: File): List<String> {
+        val key = dir.absolutePath
+        val now = System.currentTimeMillis()
+        subtitleFileCache[key]?.let { (at, names) ->
+            if (now - at < 60_000L) return names
+        }
+        val names = dir.listFiles().orEmpty()
+            .filter { it.isFile && Formats.isSubtitle(it.name) && it.canRead() }
+            .map { it.name }
+        // 浏览过的目录不设上限会一直长；64 个目录足够覆盖「同一文件夹连播」的场景
+        if (subtitleFileCache.size > 64) subtitleFileCache.clear()
+        subtitleFileCache[key] = now to names
+        return names
+    }
+
     private fun subtitleChoiceFor(item: VideoItem): SubtitleChoice? {
         val path = item.localPath ?: return null
         val dir = File(path).parentFile ?: return null
-        val match = dir.listFiles()
-            ?.filter {
-                it.isFile && Formats.isSubtitle(it.name) && it.canRead() &&
-                    Formats.matchesVideoStrict(item.fileName, it.name)
-            }
-            ?.minWithOrNull(
-                compareBy<File> { Formats.subtitlePriority(item.fileName, it.name) }
-                    .thenBy { it.name.lowercase() },
+        val match = subtitleFilesIn(dir)
+            .filter { Formats.matchesVideoStrict(item.fileName, it) }
+            .minWithOrNull(
+                compareBy<String> { Formats.subtitlePriority(item.fileName, it) }
+                    .thenBy { it.lowercase() },
             ) ?: return null
-        return SubtitleChoice(match.absolutePath, match.name)
+        return SubtitleChoice(File(dir, match).absolutePath, match)
     }
 
     private fun releaseMedia() {
@@ -2286,7 +2333,10 @@ object Playback {
         // 「保险箱视频出现在历史里」在数据层就不可能发生，不靠界面记得过滤。
         if (item.id.startsWith(PlaybackProgressRepo.VAULT_PREFIX)) {
             val repo = progressRepo ?: return
-            scope.launch { repo.record(item.id, position, duration, force) }
+            scope.launch {
+                runCatching { repo.record(item.id, position, duration, force) }
+                    .onFailure { Log.w(TAG, "保险箱播放进度保存失败", it) }
+            }
             return
         }
         val repo = historyRepo ?: return
@@ -2299,7 +2349,10 @@ object Playback {
                     item.localPath?.let { !File(it).exists() } == true
             }
             if (gone) return@launch
-            repo.record(item, position, duration, force)
+            // 进度写不进去就记不上，用户看到的是「看完一集，回来还是从头开始」。
+            // 播放中每 30 秒轮询一次，失败了会持续静默，所以至少留一条日志。
+            runCatching { repo.record(item, position, duration, force) }
+                .onFailure { Log.w(TAG, "历史记录保存失败：${item.title}", it) }
         }
     }
 

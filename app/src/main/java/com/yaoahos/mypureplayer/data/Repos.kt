@@ -19,6 +19,10 @@ import java.io.File
 /** SMB 服务器列表 */
 class ServerRepo(context: Context) {
 
+    private companion object {
+        const val TAG = "ServerRepo"
+    }
+
     /**
      * 落盘的是 StoredServer（密码为密文），内存里始终是明文 SmbServer。
      * 这样即使 filesDir 被备份或读出，也不会直接暴露 NAS 密码。
@@ -115,10 +119,27 @@ class ServerRepo(context: Context) {
         val host = parsed.host.trim().lowercase()
         // 只取共享名：后面那段是共享内的目录与文件名，与服务器配置无关
         val share = parsed.share.substringBefore('/').trim().lowercase()
-        if (host.isBlank() || share.isBlank()) return null
+        if (host.isBlank() || share.isBlank()) {
+            // 解析不出 host/共享名 = 地址本身有问题（不是「位置被移除」）。
+            // 不记日志的话，用户只看到一句笼统提示，排查时无从下手。
+            android.util.Log.w(
+                TAG,
+                "SMB 地址解析不完整：host='$host' share='$share' uri=$uri",
+            )
+            return null
+        }
         val exact = serverId.takeIf { it > 0L }?.let { byId(it) }
         if (exact != null && exact.covers(host, share)) return exact
         return _servers.value.firstOrNull { it.covers(host, share) }
+            ?: run {
+                android.util.Log.w(
+                    TAG,
+                    "SMB 位置不在配置内：host='$host' share='$share' " +
+                        "已配置=${_servers.value.joinToString { "${SmbInput.parse(it.host).host}/${it.share}" }} " +
+                        "uri=$uri",
+                )
+                null
+            }
     }
 
     /**

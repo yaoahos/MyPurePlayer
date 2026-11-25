@@ -199,13 +199,45 @@ fun PlayerScreen(navController: NavHostController) {
     val tracks by Playback.subtitleTracks.collectAsStateWithLifecycle()
     val subtitleFiles by Playback.subtitleFiles.collectAsStateWithLifecycle()
     val audioTracks by Playback.audioTracks.collectAsStateWithLifecycle()
-    val pipOnHome by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val pipOnHome by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = Graph.settings.currentOrNull() ?: AppSettings())
 
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
     val activity = remember(context) { context.findActivity() }
     val exitView = LocalView.current
+
+    /**
+     * 当前播的是不是保险箱里的视频。
+     *
+     * 保险箱的承诺是「私密」，但画面一旦上屏，系统侧还有三个出口：
+     * 最近任务缩略图、截图、录屏。这三个都归 `FLAG_SECURE` 管 —— 不加的话，
+     * 刚播过的私密视频会留一张定格画面在最近任务里，截图也能直接存进相册。
+     */
+    val isVaultPlayback = state.item?.id?.startsWith("vault:") == true
+    DisposableEffect(isVaultPlayback) {
+        val window = activity?.window
+        if (isVaultPlayback) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            // 离开播放页/切到普通视频时撤掉：否则整个应用的截图都会被自己的保护挡住
+            if (isVaultPlayback) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
+    // 保险箱的自动上锁（前台闲置 5 分钟 / 切后台）会把内存里的数据密钥清掉。
+    // 正在播放的密文要靠这把钥匙才能读下去，锁了就必须停 —— 否则「自动上锁」
+    // 对正在播放的私密视频等于没生效。
+    val vaultUnlocked by Graph.vault.unlocked.collectAsStateWithLifecycle()
+    LaunchedEffect(isVaultPlayback, vaultUnlocked) {
+        if (isVaultPlayback && !vaultUnlocked) {
+            Playback.pause()
+            navController.popBackStack()
+        }
+    }
 
     /**
      * 退出播放页前的准备：记录进度，但不马上暂停、不马上恢复系统栏布局。
@@ -287,6 +319,12 @@ fun PlayerScreen(navController: NavHostController) {
     }
 
     fun enterPictureInPicture() {
+        // 保险箱视频禁止小窗：一进小窗，内容就挂在系统桌面之上，
+        // 谁路过都能看；而且小窗状态下 FLAG_SECURE 的表现因机型而异，不能赌。
+        if (isVaultPlayback) {
+            seekHint = "保险箱视频不支持小窗播放"
+            return
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             seekHint = "当前系统版本不支持小窗播放"
             return

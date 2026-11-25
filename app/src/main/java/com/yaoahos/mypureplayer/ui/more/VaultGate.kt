@@ -1,10 +1,16 @@
 package com.yaoahos.mypureplayer.ui.more
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassTextField
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,7 +34,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,8 +58,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yaoahos.mypureplayer.data.Graph
 import com.yaoahos.mypureplayer.data.VaultConfig
 import com.yaoahos.mypureplayer.data.VaultRepo
-import com.yaoahos.mypureplayer.ui.components.appGlass
-import com.yaoahos.mypureplayer.ui.components.appGlassSurface
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
+import com.yaoahos.mypureplayer.ui.components.appDialogSurface
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.PasswordEye
 import kotlinx.coroutines.launch
@@ -221,7 +226,8 @@ fun VaultSetupDialog(
 
     AlertDialog(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
         title = { Text("设置保险箱密码") },
@@ -239,21 +245,19 @@ fun VaultSetupDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                GlassTextField(
                     value = pin,
                     onValueChange = { pin = Graph.vault.normalizePin(it); error = null },
-                    label = { Text("密码") },
-                    singleLine = true,
+                    label = "密码",
                     visualTransformation = if (showPin) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = { PasswordEye(showPin) { showPin = !showPin } },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                GlassTextField(
                     value = confirm,
                     onValueChange = { confirm = Graph.vault.normalizePin(it); error = null },
-                    label = { Text("再次输入") },
-                    singleLine = true,
+                    label = "再次输入",
                     visualTransformation = if (showConfirm) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = { PasswordEye(showConfirm) { showConfirm = !showConfirm } },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -280,7 +284,7 @@ fun VaultSetupDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            GlassDialogButton(
                 enabled = valid && !saving,
                 onClick = {
                     saving = true
@@ -321,9 +325,10 @@ fun VaultSetupDialog(
                         }
                     }
                 },
+            tone = GlassButtonTone.Accent,
             ) { Text(if (saving) "设置中…" else "确定") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { GlassDialogButton(onClick = onDismiss) { Text("取消") } },
     )
 }
 
@@ -440,15 +445,14 @@ fun VaultUnlockPanel(
                 null
             }
 
-        OutlinedTextField(
+        GlassTextField(
             value = pin,
             // 同一套归一：全角数字会被转成半角，否则"设得进去、解不开"
             onValueChange = {
                 pin = Graph.vault.normalizePin(it)
                 error = null
             },
-            label = { Text("密码") },
-            singleLine = true,
+            label = "密码",
             visualTransformation = if (showPin) VisualTransformation.None else PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             trailingIcon = {
@@ -458,6 +462,7 @@ fun VaultUnlockPanel(
                     PasswordEye(showPin) { showPin = !showPin }
                 }
             },
+            isError = error != null,
             modifier = Modifier.fillMaxWidth().offset(x = shake.value.dp),
         )
         val remaining = Graph.vault.lockRemainingMs()
@@ -474,9 +479,13 @@ fun VaultUnlockPanel(
             Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
         }
         Spacer(Modifier.height(18.dp))
-        Button(
+        // 与弹窗底部、表单行尾同一套玻璃按钮：M3 Button 的实色片在玻璃面板上是一个
+        // 突兀的深蓝块，而这一屏除此之外全是玻璃
+        com.yaoahos.mypureplayer.ui.components.GlassButton(
+            text = "解锁",
+            loading = checking,
             onClick = {
-                if (!Graph.vault.isPinValid(pin)) return@Button
+                if (!Graph.vault.isPinValid(pin)) return@GlassButton
                 checking = true
                 scope.launch {
                     val ok = Graph.vault.verifyPin(pin)
@@ -493,17 +502,7 @@ fun VaultUnlockPanel(
             enabled = pin.length in VaultRepo.MIN_PIN..VaultRepo.MAX_PIN &&
                 !checking && Graph.vault.lockRemainingMs() <= 0L,
             modifier = Modifier.fillMaxWidth(),
-        ) {
-            if (checking) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
-            } else {
-                Text("解锁")
-            }
-        }
+        )
     }
 }
 
@@ -521,18 +520,59 @@ fun VaultUnlockDialog(
     title: String = "解锁保险箱",
 ) {
     val config by Graph.vault.config.collectAsStateWithLifecycle()
+    // 与其它弹窗同一策略：有应用内浮层就不开新窗口。
+    // 独立窗口自带一层 dim（实测 0.6），只压页面不压状态栏 —— 打开时会看到
+    // 顶部状态栏比下面亮一截；开窗本身还要 50~65ms。
+    val host = com.yaoahos.mypureplayer.ui.components.LocalAppOverlayHost.current
+    if (host != null) {
+        com.yaoahos.mypureplayer.ui.components.AppOverlaySlot {
+            UnlockBody(config, title, onDismiss, onUnlocked)
+        }
+        return
+    }
     androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
+        com.yaoahos.mypureplayer.ui.components.DisableDialogWindowDim()
+        UnlockBody(config, title, onDismiss, onUnlocked)
+    }
+}
+
+@Composable
+private fun UnlockBody(
+    config: VaultConfig,
+    title: String,
+    onDismiss: () -> Unit,
+    onUnlocked: () -> Unit,
+) {
+    androidx.activity.compose.BackHandler { onDismiss() }
+    Box(Modifier.fillMaxSize()) {
+        // 遮罩：早先这个弹窗没有遮罩，全靠对话框窗口的 dim。走浮层后必须自己画，
+        // 否则背后页面仍然是亮的，看不出"这是一个需要先处理掉的框"。
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+        )
         Column(
             Modifier
+                .align(Alignment.Center)
                 .fillMaxWidth(0.92f)
                 .widthIn(max = com.yaoahos.mypureplayer.ui.components.PageMetrics.DialogMaxWidth)
-                .appGlassSurface(
+                // 与全站弹窗同一块面板：早先用 panelStrong（近实色白片），在浅色下比
+                // 其它弹窗明显更白更实，看起来像"另一套弹窗"。改成同一张玻璃面板。
+                .appDialogSurface(
                     shape = RoundedCornerShape(PageMetrics.PanelRadius),
-                    strong = true,
-                    elevation = 12.dp,
+                    elevation = 8.dp,
                 )
                 .padding(vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -543,7 +583,12 @@ fun VaultUnlockDialog(
                 modifier = Modifier.padding(top = 14.dp),
             )
             VaultUnlockPanel(config = config, onUnlocked = onUnlocked)
-            TextButton(onClick = onDismiss, modifier = Modifier.padding(bottom = 6.dp)) { Text("取消") }
+            com.yaoahos.mypureplayer.ui.components.GlassButton(
+                text = "取消",
+                onClick = onDismiss,
+                modifier = Modifier.padding(bottom = 8.dp, top = 2.dp),
+                tone = com.yaoahos.mypureplayer.ui.components.GlassButtonTone.Neutral,
+            )
         }
     }
 }

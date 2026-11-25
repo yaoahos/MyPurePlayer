@@ -1,5 +1,7 @@
 package com.yaoahos.mypureplayer.ui.local
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -44,6 +47,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -79,8 +83,8 @@ import java.io.File
 import com.yaoahos.mypureplayer.ui.MainScaffold
 import com.yaoahos.mypureplayer.ui.MainTab
 import com.yaoahos.mypureplayer.ui.Routes
-import com.yaoahos.mypureplayer.ui.components.appGlass
-import com.yaoahos.mypureplayer.ui.components.appGlassSurface
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
+import com.yaoahos.mypureplayer.ui.components.appDialogSurface
 import com.yaoahos.mypureplayer.ui.components.DirPickerDialog
 import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.EmptyState
@@ -197,6 +201,9 @@ fun LocalScreen(navController: NavHostController) {
     // 必须接着执行刚才那一步，否则只能重新长按、重新确认，还容易拿到过期条目。
     var pendingPermissionOp by remember { mutableStateOf<(() -> Unit)?>(null) }
     var busyText by remember { mutableStateOf<String?>(null) }
+    // 可量化的长任务（加密进保险箱）额外带百分比与副标题；普通忙碌只转圈。
+    var busyProgress by remember { mutableStateOf<Float?>(null) }
+    var busyDetail by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<VideoItem?>(null) }
     // 多选删除（含多选里的文件夹）：与单条一样先确认，不能因为「选了好几个」就跳过
     var pendingMultiDelete by remember { mutableStateOf<List<VideoItem>?>(null) }
@@ -331,11 +338,37 @@ fun LocalScreen(navController: NavHostController) {
     }
     val visibleVideos = if (browseMode == 1 && currentFolderKey == null) emptyList() else scopedVideos
 
-    fun runBusy(text: String, block: suspend () -> String) {
+    /**
+     * 忙碌遮罩的统一实现。
+     *
+     * [showProgress] 为 false 时只有转圈（重命名、复制、移入回收站这些瞬时的或
+     * 无法估量的操作）；为 true 时显示条形进度。加密一个大文件要几秒到几十秒，
+     * 只转圈会让人以为卡死；百分比按 1% 节流（加密回调是 256KB 一次的，
+     * 不节流会把重组打爆）。
+     */
+    fun runBusyInternal(
+        text: String,
+        showProgress: Boolean,
+        block: suspend ((Float, String?) -> Unit) -> String,
+    ) {
         scope.launch {
             busyText = text
-            val result = runCatching { block() }
+            busyProgress = if (showProgress) 0f else null
+            busyDetail = null
+            var lastPercent = -1
+            val report: (Float, String?) -> Unit = { fraction, detail ->
+                val value = fraction.coerceIn(0f, 1f)
+                val percent = (value * 100).toInt()
+                if (percent != lastPercent) {
+                    lastPercent = percent
+                    busyProgress = value
+                    if (detail != null) busyDetail = detail
+                }
+            }
+            val result = runCatching { block(report) }
             busyText = null
+            busyProgress = null
+            busyDetail = null
             // 显式语气，不再靠中文关键词猜；异常即失败，成功结果统一 success
             result.fold(
                 onSuccess = { Notice.success(it) },
@@ -343,6 +376,14 @@ fun LocalScreen(navController: NavHostController) {
             )
             Graph.local.scan()
         }
+    }
+
+    fun runBusyProgress(text: String, block: suspend ((Float, String?) -> Unit) -> String) {
+        runBusyInternal(text, showProgress = true, block)
+    }
+
+    fun runBusy(text: String, block: suspend () -> String) {
+        runBusyInternal(text, showProgress = false) { block() }
     }
 
     MainScaffold(
@@ -435,7 +476,7 @@ fun LocalScreen(navController: NavHostController) {
                                     when {
                                         !vaultConfig.enabled -> { pendingHide = request; vaultSetupOpen = true }
                                         !vaultUnlocked -> unlockThenHide = request
-                                        else -> hideToVault(request) { text, block -> runBusy(text, block) }
+                                        else -> hideToVault(request) { text, block -> runBusyProgress(text, block) }
                                     }
                                 }
                             }
@@ -535,9 +576,9 @@ fun LocalScreen(navController: NavHostController) {
                         EmptyState(
                             icon = Icons.Rounded.Movie,
                             title = "没有找到视频",
+                            // 不给按钮：这一页的空态本身就能下拉刷新（外层 PullRefreshBox +
+                            // ScrollableFill），按钮只是把同一个动作抄了一遍，还占掉空态的视觉重心。
                             message = "把视频放进手机的影片/相册目录后，下拉即可重新扫描。",
-                            actionLabel = "重新扫描",
-                            onAction = { scope.launch { Graph.local.scan() } },
                         )
                     }
 
@@ -640,17 +681,42 @@ fun LocalScreen(navController: NavHostController) {
                 ) {
                     Column(
                         Modifier
-                            .appGlassSurface(
-                                androidx.compose.foundation.shape.RoundedCornerShape(PageMetrics.PanelRadius),
-                                strong = true,
+                            // 与全站弹窗同一块玻璃面板。早先这里用 panelStrong（近实色白片），
+                            // 扫描/导入时这块浮层比其它弹窗白一大截，像另一套 UI。
+                            .appDialogSurface(
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(PageMetrics.PanelRadius),
                                 elevation = 8.dp,
                             )
                             .padding(horizontal = 28.dp, vertical = 22.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        CircularProgressIndicator(Modifier.padding(2.dp))
-                        Text(text, style = MaterialTheme.typography.bodyMedium)
+                        val progress = busyProgress
+                        if (progress == null) {
+                            CircularProgressIndicator(Modifier.padding(2.dp))
+                            Text(text, style = MaterialTheme.typography.bodyMedium)
+                        } else {
+                            // 有条形进度时不再叠一个转圈：标题 → 正在处理的文件 → 进度条 → 百分比，
+                            // 与保险箱页解密、移出的进度弹窗保持同一套信息顺序。
+                            Text(text, style = MaterialTheme.typography.bodyMedium)
+                            busyDetail?.let { detail ->
+                                Text(
+                                    detail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                )
+                            }
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.width(200.dp),
+                            )
+                            Text(
+                                "${(progress * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
@@ -722,7 +788,7 @@ fun LocalScreen(navController: NavHostController) {
             },
             onUnlocked = {
                 unlockThenHide = null
-                hideToVault(request) { text, block -> runBusy(text, block) }
+                hideToVault(request) { text, block -> runBusyProgress(text, block) }
             },
         )
     }
@@ -735,7 +801,7 @@ fun LocalScreen(navController: NavHostController) {
                 val request = pendingHide
                 pendingHide = null
                 if (request != null && request.items.isNotEmpty()) {
-                    hideToVault(request) { text, block -> runBusy(text, block) }
+                    hideToVault(request) { text, block -> runBusyProgress(text, block) }
                 }
             },
         )
@@ -820,9 +886,22 @@ fun LocalScreen(navController: NavHostController) {
                 selection.exit()
                 guarded {
                     scope.launch {
-                        targets.forEach { runCatching { Graph.trash.moveToTrash(it) } }
-                        Graph.forgetGone(targets)
-                        Notice.success("已将 ${targets.size} 个视频移入回收站")
+                        // 一次批量搬运、只落盘一次：逐个调 moveToTrash 时每搬一个都要
+                        // 全量重写 trash.json 并推一次列表，50 个视频就是 50 次写盘。
+                        val result = Graph.trash.moveManyToTrash(targets)
+                        val movedPaths = result.moved.mapTo(HashSet()) { it.originalPath }
+                        val movedItems = targets.filter { it.localPath in movedPaths }
+                        // 只摘成功的：失败的还躺在原处，历史和播放列表也该继续留着
+                        Graph.forgetGone(movedItems)
+                        val failed = targets.size - result.moved.size
+                        when {
+                            result.moved.isEmpty() -> Notice.error(result.firstError ?: "删除失败")
+                            failed > 0 -> Notice.error(
+                                "已移入回收站 ${result.moved.size} 个，" +
+                                    "$failed 个失败：${result.firstError ?: "请检查存储权限"}",
+                            )
+                            else -> Notice.success("已将 ${result.moved.size} 个视频移入回收站")
+                        }
                     }
                 }
             },
@@ -893,7 +972,8 @@ fun LocalScreen(navController: NavHostController) {
     if (permissionDialog) {
         AlertDialog(
             shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { permissionDialog = false; pendingPermissionOp = null },
             title = { Text("需要「所有文件访问权限」") },
@@ -904,13 +984,13 @@ fun LocalScreen(navController: NavHostController) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     permissionDialog = false
                     runCatching { context.startActivity(FileOps.allFilesSettingsIntent(context)) }
-                }) { Text("去开启") }
+                }, tone = GlassButtonTone.Accent) { Text("去开启") }
             },
             dismissButton = {
-                TextButton(onClick = { permissionDialog = false; pendingPermissionOp = null }) { Text("取消") }
+                GlassDialogButton(onClick = { permissionDialog = false; pendingPermissionOp = null }) { Text("取消") }
             },
         )
     }
@@ -943,12 +1023,19 @@ private data class VaultHide(val items: List<VideoItem>, val group: String = "")
  */
 private fun hideToVault(
     request: VaultHide,
-    runBusy: (String, suspend () -> String) -> Unit,
+    runBusy: (String, suspend ((Float, String?) -> Unit) -> String) -> Unit,
 ) {
     if (request.items.isEmpty()) return
-    runBusy("正在加密移入保险箱…") {
+    runBusy("正在加密移入保险箱…") { report ->
         try {
-            Graph.vault.add(request.items, group = request.group).fold(
+            Graph.vault.add(request.items, group = request.group) { index, total, p ->
+                // 多文件时总进度按「第几个 + 这个文件的百分比」折算，副标题给出文件名，
+                // 否则一串大文件连着加密时，界面只有百分比没有「在动哪一个」。
+                val count = total.coerceAtLeast(1)
+                val overall = ((index + p) / count).coerceIn(0f, 1f)
+                val name = request.items.getOrNull(index)?.fileName
+                report(overall, if (total > 1 && name != null) "第 ${index + 1}/$total 个 · $name" else name)
+            }.fold(
                 onSuccess = { count ->
                     // 加密成功后明文已删除，历史和播放列表里的对应条目一并摘掉
                     Graph.forgetGone(request.items)

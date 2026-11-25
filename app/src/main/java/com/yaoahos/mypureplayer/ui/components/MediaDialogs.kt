@@ -50,7 +50,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -60,6 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.data.Graph
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -270,7 +270,8 @@ fun FolderInfoDialog(
 ) {
     AlertDialog(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         // 玻璃底：与全站卡片同一套材质，弹窗压住内容时仍透出一点页面
         onDismissRequest = onDismiss,
@@ -284,7 +285,7 @@ fun FolderInfoDialog(
                 InfoRow("来源", source)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { GlassDialogButton(onClick = onDismiss) { Text("关闭") } },
     )
 }
 
@@ -518,22 +519,31 @@ fun RenameDialog(
     val base = item.fileName.substringBeforeLast('.', item.fileName)
     var text by remember { mutableStateOf(base) }
     val ext = item.fileName.substringAfterLast('.', "")
-    val suffixSlot: (@Composable () -> Unit)? = if (ext.isBlank()) null else { { Text(".$ext") } }
+    val suffixSlot: (@Composable () -> Unit)? = if (ext.isBlank()) null else {
+        {
+            // 后缀紧跟在文字后面：与输入文字同字号，颜色压暗一点读作「不可编辑」
+            Text(
+                text = ".$ext",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 
     AlertDialog(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         // 玻璃底：与全站卡片同一套材质，弹窗压住内容时仍透出一点页面
         onDismissRequest = onDismiss,
         title = { Text("重命名") },
         text = {
             Column {
-                OutlinedTextField(
+                GlassTextField(
                     value = text,
                     onValueChange = { text = it },
-                    label = { Text("文件名") },
-                    singleLine = true,
+                    label = "文件名",
                     suffix = suffixSlot,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -546,12 +556,13 @@ fun RenameDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            GlassDialogButton(
                 onClick = { onConfirm(text.trim()) },
                 enabled = text.trim().isNotEmpty() && text.trim() != base,
+                tone = GlassButtonTone.Accent,
             ) { Text("确定") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { GlassDialogButton(onClick = onDismiss) { Text("取消") } },
     )
 }
 
@@ -577,7 +588,8 @@ fun MediaInfoDialog(item: VideoItem, onDismiss: () -> Unit) {
 
     AlertDialog(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         // 玻璃底：与全站卡片同一套材质，弹窗压住内容时仍透出一点页面
         onDismissRequest = onDismiss,
@@ -596,10 +608,18 @@ fun MediaInfoDialog(item: VideoItem, onDismiss: () -> Unit) {
                 InfoRow("时长", if (durationMs > 0L) Formats.formatDuration(durationMs) else "未知")
                 // 网络视频的宽高同样不在条目上：抽帧/播放时解析出来记进了 Thumbnails 缓存，
                 // 和时长一样做一次兜底读取，否则信息页永远是「未知」。
-                val size = remember(item.id) { Thumbnails.cachedSize(context, item) }
+                // 读缓存文件拿宽高是磁盘操作，不能在组合期同步做（SMB 条目还会触发读盘），
+                // 先给「未知」，拿到结果再刷新这一行
+                var size by remember(item.id) { mutableStateOf<Pair<Int, Int>?>(null) }
+                LaunchedEffect(item.id) {
+                    size = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        Thumbnails.cachedSize(context, item)
+                    }
+                }
+                val dimension = size
                 InfoRow(
                     "分辨率",
-                    if (size != null) "${size.first} × ${size.second}" else "未知",
+                    if (dimension != null) "${dimension.first} × ${dimension.second}" else "未知",
                 )
                 InfoRow("修改时间", date)
                 InfoRow(
@@ -612,7 +632,7 @@ fun MediaInfoDialog(item: VideoItem, onDismiss: () -> Unit) {
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { GlassDialogButton(onClick = onDismiss) { Text("关闭") } },
     )
 }
 
@@ -687,7 +707,8 @@ fun DirPickerDialog(
 
     AlertDialog(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         // 玻璃底：与全站卡片同一套材质，弹窗压住内容时仍透出一点页面
         onDismissRequest = onDismiss,
@@ -751,9 +772,12 @@ fun DirPickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onPick(current) }) { Text("选择此目录") }
+            GlassDialogButton(
+                onClick = { onPick(current) },
+                tone = GlassButtonTone.Accent,
+            ) { Text("选择此目录") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { GlassDialogButton(onClick = onDismiss) { Text("取消") } },
     )
 }
 
@@ -805,15 +829,17 @@ fun PlaylistTargetSheet(
         }
         Spacer(Modifier.height(6.dp))
         androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            GlassDialogButton(onClick = onDismiss) { Text("取消") }
         }
     }
 }
 
 /**
- * 玻璃选择弹窗内部的圆条选项：直接用本地文件夹卡片同款玻璃材质 [appGlassSurface]。
- * 面板已改为首页那张浅色渐变（[appDialogSurface]），选项再叠一张淡蓝玻璃卡，
- * 正是首页「淡背景 + 淡蓝玻璃卡」的层次，不会像过去"白条压灰板"那样突兀。
+ * 玻璃选择弹窗内部的圆条选项：用 [AppGlassColors.dialogItem] 这一档亮玻璃，
+ * 压在比页面深一档的弹窗面板上（见 [appDialogSurface]）。
+ *
+ * 不用卡片那档 [AppGlassColors.panel]：面板本身已经压深，选项条若跟着深，
+ * 两者只差一两个色阶，一屏选项会糊成一整块——「深玻璃板 + 亮玻璃条」才是浮层该有的层次。
  *
  * [selected] 用于「当前生效的那一项」：底色染主题色 + 标题改强调色 + 右侧打勾，
  * 三处同时出现，避免只换底色在深色主题下看不出选中。
@@ -828,7 +854,8 @@ fun GlassChoiceRow(
     onClick: () -> Unit,
 ) {
     val contentAlpha = if (enabled) 1f else 0.5f
-    val accent = appGlass().accent
+    val glass = appGlass()
+    val accent = glass.accent
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectPressedWithTap()
     val shape = RoundedCornerShape(GlassPress.radius)
@@ -842,6 +869,8 @@ fun GlassChoiceRow(
                             shape,
                             elevation = 1.dp,
                             tinted = selected,
+                            // 弹窗面板是一块比页面深的淡色玻璃，选项条必须反过来更亮才数得清
+                            fillOverride = glass.dialogItem,
                         )
                         // 选项条原先**没有任何按压反馈**：只有选中态变色。
                         // 点一下没反应会让人以为没点上，于是连点两下（第二下才看到选中）。
@@ -915,44 +944,118 @@ fun GlassChoiceDialog(
     onDismiss: () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    // 与 ConfirmDialog / AppBottomSheet 同一策略：有应用内浮层就不开新窗口。
+    //
+    // 开窗的代价不止「新 Window + ViewRootImpl + Surface 一次全屏布局」（实测 50~65ms），
+    // 更明显的是它自带一层**窗口级 dim**（本机实测 0.6）：dim 只压 Activity 窗口、
+    // 不压状态栏，于是页面被压成 65/255、状态栏只压到 98/255，两者差 33 个色阶 ——
+    // 用户看到的就是「打开播放顺序 / 保留天数时，顶部时间、电池栏变色」。
+    // 走应用内浮层后只剩自绘的那一层遮罩，状态栏与页面亮度完全一致。
+    val host = LocalAppOverlayHost.current
+    if (host != null) {
+        AppOverlaySlot { ChoiceBody(title, onDismiss, inOverlay = true, content = content) }
+        return
+    }
     androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            // 让窗口内容延伸到状态栏：遮罩要盖住顶栏，否则状态栏会亮着一条
+            decorFitsSystemWindows = false,
+        ),
     ) {
-        // 用真实窗口尺寸算高度上限：横屏/折叠屏可用高度很矮，弹窗必须能整体滚动，
-        // 否则选项列表会把标题和底部按钮顶出屏幕。
-        val windowHeight = with(LocalDensity.current) {
-            androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp()
-        }
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f))
-                .clickable(role = Role.Button, onClickLabel = "关闭", onClick = onDismiss),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth(0.86f)
-                    // 手机上按 86% 宽，平板/横屏不超过 DialogMaxWidth，避免铺满整屏。
-                    .widthIn(max = PageMetrics.DialogMaxWidth)
-                    .heightIn(max = (windowHeight - 48.dp).coerceAtLeast(240.dp))
-                    .verticalScroll(rememberScrollState())
-                    // 面板直接用首页那张不透明渐变（淡蓝白），像从页面里裁出来的一块；
-                    // 选项条再叠文件夹卡片同款玻璃，层次与首页「淡背景 + 淡蓝玻璃卡」一致。
-                    .appDialogSurface(RoundedCornerShape(26.dp))
-                    .clickable(enabled = false, onClick = {}) // 吞掉点击，避免穿透到遮罩
-                    .padding(horizontal = 20.dp, vertical = 18.dp),
-            ) {
-                // title 之前只是形参、从未画出来：所有选择弹窗都少了标题。
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(bottom = 12.dp),
+        ChoiceBody(title, onDismiss, inOverlay = false, content = content)
+    }
+}
+
+@Composable
+private fun ChoiceBody(
+    title: String,
+    onDismiss: () -> Unit,
+    inOverlay: Boolean,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (inOverlay) {
+        // 浮层没有对话框窗口替它拦返回键
+        androidx.activity.compose.BackHandler { onDismiss() }
+    } else {
+        // 退回窗口形态时把窗口 dim 关掉，否则会和下面的自绘遮罩叠成两层
+        DisableDialogWindowDim()
+    }
+    // 用真实窗口尺寸算高度上限：横屏/折叠屏可用高度很矮，弹窗必须能整体滚动，
+    // 否则选项列表会把标题和底部按钮顶出屏幕。
+    val windowHeight = with(LocalDensity.current) {
+        androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp()
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f))
+            // 遮罩上**必须关掉 indication**：默认的 M3 水波纹会把当前主题色（蓝）画在
+            // 半透明黑遮罩上，点哪冒哪一团 —— 用户看到的「点弹窗外出现蓝色阴影」就是它。
+            // 遮罩只是"点外面关掉"的感应面，不该有任何视觉反馈。
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                role = Role.Button,
+                onClickLabel = "关闭",
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                // 手机上按 86% 宽，平板/横屏不超过 DialogMaxWidth，避免铺满整屏。
+                .widthIn(max = PageMetrics.DialogMaxWidth)
+                .heightIn(max = (windowHeight - 48.dp).coerceAtLeast(240.dp))
+                .verticalScroll(rememberScrollState())
+                // 面板直接用首页那张不透明渐变（淡蓝白），像从页面里裁出来的一块；
+                // 选项条再叠文件夹卡片同款玻璃，层次与首页「淡背景 + 淡蓝玻璃卡」一致。
+                .appDialogSurface(RoundedCornerShape(26.dp))
+                // 吞掉面板上的点击，**不能用 clickable(enabled = false)**：禁用态不参与手势
+                // 分发、也不消费事件，点在标题或选项之间的空白会穿透到遮罩把弹窗误关掉。
+                // 用 enabled 的 clickable + indication = null：能消费点击，又不画水波纹，
+                // 且移动超过 touchSlop 就放弃，不会妨碍长列表弹窗自身的滚动。
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
                 )
-                content()
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+        ) {
+            // title 之前只是形参、从未画出来：所有选择弹窗都少了标题。
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+            content()
+        }
+    }
+}
+
+/**
+ * 关掉对话框窗口自带的 dim。
+ *
+ * Compose 的 Dialog 会给自己那个窗口设一层 dim（本机实测 0.6），而本项目每个弹窗
+ * 都已经在内容里自绘遮罩。两层叠加的结果是「遮罩下的页面 65/255、状态栏 98/255」，
+ * 状态栏亮出一横条。只有窗口形态需要这一步；应用内浮层没有独立窗口。
+ */
+@Composable
+internal fun DisableDialogWindowDim() {
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.LaunchedEffect(view) {
+        // 逐级向上找：Compose Dialog 的根 View 直接实现 DialogWindowProvider，
+        // 但 AlertDialog 内部还套着 Surface / 布局，父链不止一层。
+        var parent: android.view.ViewParent? = view.parent
+        while (parent != null) {
+            if (parent is androidx.compose.ui.window.DialogWindowProvider) {
+                parent.window?.setDimAmount(0f)
+                return@LaunchedEffect
             }
+            parent = (parent as? android.view.View)?.parent ?: parent.parent
         }
     }
 }

@@ -1,5 +1,8 @@
 package com.yaoahos.mypureplayer.ui.more
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassTextField
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -52,7 +55,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -107,6 +109,7 @@ import com.yaoahos.mypureplayer.ui.components.SelectionBadge
 import com.yaoahos.mypureplayer.ui.components.SelectionMoreSheet
 import com.yaoahos.mypureplayer.ui.components.SortLayoutSheet
 import com.yaoahos.mypureplayer.ui.components.adaptiveMediaGridMinSize
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
@@ -180,8 +183,11 @@ fun VaultScreen(navController: NavHostController) {
     // 否则新密码会绑到一把新密钥上，旧文件全部解不开。
     var verifiedOldPin by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
-    var decrypting by remember { mutableStateOf<VaultEntry?>(null) }
-    var progress by remember { mutableStateOf(0f) }
+    // 解密播放、移出、关闭保险箱共用同一个进度弹窗：标题 / 当前文件（或第几个）/ 0~1 进度。
+    // 三者都是「把整个文件解一遍」的长任务，用同一套信息顺序，用户不用重新适应。
+    var progressTitle by remember { mutableStateOf<String?>(null) }
+    var progressDetail by remember { mutableStateOf("") }
+    var progressValue by remember { mutableStateOf(0f) }
 
     LaunchedEffect(Unit) { Graph.vault.load() }
 
@@ -252,12 +258,65 @@ fun VaultScreen(navController: NavHostController) {
         query = ""
     }
 
-    fun play(entry: VaultEntry) {
+    /**
+     * 进度写入按 1% 节流。
+     *
+     * Crypto 的回调是每 256KB 一次，1GB 文件就是四千多次；每次都写状态会让整页重组，
+     * 反而拖慢解密本身。每次操作新建一个，闭包里各自记上次的百分比。
+     */
+    fun progressReporter(): (Float) -> Unit {
+        var lastPercent = -1
+        return { raw ->
+            val value = raw.coerceIn(0f, 1f)
+            val percent = (value * 100).toInt()
+            if (percent != lastPercent) {
+                lastPercent = percent
+                progressValue = value
+            }
+        }
+    }
+
+    /**
+     * 页面上的写操作协程统一从这里起。
+     *
+     * 解密/移出/关闭保险箱都是「先动文件、后写索引」，中途抛出的异常一旦逃到页面协程，
+     * 用户看到的就是闪退 —— 而且此时文件往往已经处理完了，失败提示反而更准确。
+     * 出错时顺手收起进度弹窗，否则一个不会往前走的进度条会一直盖在屏幕上。
+     * 取消信号原样抛出：那是页面退出的正常流程。
+     */
+    fun launchUi(block: suspend () -> Unit) {
         scope.launch {
-            decrypting = entry
-            progress = 0f
-            val file = Graph.vault.preparePlayback(entry) { p -> progress = p }
-            decrypting = null
+            try {
+                block()
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                progressTitle = null
+                message = t.message?.takeIf { it.isNotBlank() } ?: "操作失败，请重试"
+            }
+        }
+    }
+
+    fun play(entry: VaultEntry) {
+        launchUi {
+            val source = Graph.vault.fileOf(entry)
+            // MV4（1.0.5 起）可以边读边解：不用先解密一份完整副本，
+            // 也就没有「点开等几十秒」和「磁盘空间不够播不了」这两个问题。
+            // 只有老文件（MV3 整体 CBC）还需要走下面的整体解密。
+            val randomAccessible = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                Graph.vault.isRandomAccessible(entry)
+            }
+            if (randomAccessible) {
+                Playback.play(listOf(Graph.vault.entryToVideoItem(entry, source)), 0)
+                navController.navigate(Routes.PLAYER)
+                return@launchUi
+            }
+            progressTitle = "正在解密"
+            progressDetail = entry.fileName
+            progressValue = 0f
+            val report = progressReporter()
+            val file = Graph.vault.preparePlayback(entry) { p -> report(p) }
+            progressTitle = null
             if (file != null) {
                 val item = Graph.vault.entryToVideoItem(entry, file)
                 Playback.play(listOf(item), 0)
@@ -271,14 +330,29 @@ fun VaultScreen(navController: NavHostController) {
     }
 
     fun restoreEntries(targets: List<VaultEntry>) {
-        scope.launch {
+        launchUi {
             var ok = 0
             val failed = mutableListOf<String>()
-            targets.forEach { entry ->
-                Graph.vault.restore(entry).fold(
-                    onSuccess = { ok++ },
-                    onFailure = { failed += it.message ?: entry.fileName },
-                )
+            val total = targets.size.coerceAtLeast(1)
+            val report = progressReporter()
+            try {
+                targets.forEachIndexed { index, entry ->
+                    progressTitle = "正在移出保险箱"
+                    progressDetail = if (targets.size > 1) {
+                        "第 ${index + 1}/${targets.size} 个 · ${entry.fileName}"
+                    } else {
+                        entry.fileName
+                    }
+                    report(index.toFloat() / total)
+                    Graph.vault.restore(entry) { p ->
+                        report(((index + p) / total).coerceIn(0f, 1f))
+                    }.fold(
+                        onSuccess = { ok++ },
+                        onFailure = { failed += it.message ?: entry.fileName },
+                    )
+                }
+            } finally {
+                progressTitle = null
             }
             Graph.local.scan(silent = true)
             message = when {
@@ -291,16 +365,32 @@ fun VaultScreen(navController: NavHostController) {
     }
 
     fun restoreFolders(targets: List<VaultFolder>) {
-        scope.launch {
+        launchUi {
             var ok = 0
             val failed = mutableListOf<String>()
-            targets.forEach { folder ->
-                folder.entries.forEach { entry ->
-                    Graph.vault.restore(entry).fold(
+            // 文件夹先摊平：进度按「总共第几个文件」算，跨文件夹连续推进，
+            // 否则每个文件夹的进度条都会从 0 重新开始，看起来像卡住重来。
+            val allEntries = targets.flatMap { it.entries }
+            val total = allEntries.size.coerceAtLeast(1)
+            val report = progressReporter()
+            try {
+                allEntries.forEachIndexed { index, entry ->
+                    progressTitle = "正在移出保险箱"
+                    progressDetail = if (allEntries.size > 1) {
+                        "第 ${index + 1}/${allEntries.size} 个 · ${entry.fileName}"
+                    } else {
+                        entry.fileName
+                    }
+                    report(index.toFloat() / total)
+                    Graph.vault.restore(entry) { p ->
+                        report(((index + p) / total).coerceIn(0f, 1f))
+                    }.fold(
                         onSuccess = { ok++ },
                         onFailure = { failed += it.message ?: entry.fileName },
                     )
                 }
+            } finally {
+                progressTitle = null
             }
             Graph.local.scan(silent = true)
             message = if (failed.isEmpty()) {
@@ -317,7 +407,7 @@ fun VaultScreen(navController: NavHostController) {
     }
 
     fun deleteFolders(targets: List<VaultFolder>) {
-        scope.launch {
+        launchUi {
             val entries = targets.flatMap { it.entries }
             Graph.vault.deletePermanently(entries)
             message = if (targets.size == 1) {
@@ -684,7 +774,8 @@ fun VaultScreen(navController: NavHostController) {
     if (oldPinCheck) {
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = {
                 oldPinCheck = false
@@ -700,11 +791,10 @@ fun VaultScreen(navController: NavHostController) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
+                    GlassTextField(
                         value = oldPinText,
                         onValueChange = { oldPinText = Graph.vault.normalizePin(it); oldPinError = null },
-                        label = { Text("当前密码") },
-                        singleLine = true,
+                        label = "当前密码",
                         isError = oldPinError != null,
                         visualTransformation = if (showOldPin) {
                             VisualTransformation.None
@@ -720,12 +810,13 @@ fun VaultScreen(navController: NavHostController) {
                             err,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp),
                         )
                     }
                 }
             },
             confirmButton = {
-                TextButton(
+                GlassDialogButton(
                     enabled = oldPinText.isNotBlank() && !oldPinBusy,
                     onClick = {
                         oldPinBusy = true
@@ -745,10 +836,11 @@ fun VaultScreen(navController: NavHostController) {
                             }
                         }
                     },
+                tone = GlassButtonTone.Accent,
                 ) { Text(if (oldPinBusy) "验证中…" else "确定") }
             },
             dismissButton = {
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     oldPinCheck = false
                     oldPinText = ""
                     oldPinError = null
@@ -772,7 +864,8 @@ fun VaultScreen(navController: NavHostController) {
     restoreTarget?.let { targets ->
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { restoreTarget = null },
             title = { Text("移出保险箱") },
@@ -786,19 +879,20 @@ fun VaultScreen(navController: NavHostController) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     restoreTarget = null
                     restoreEntries(targets)
-                }) { Text("移出") }
+                }, tone = GlassButtonTone.Danger) { Text("移出") }
             },
-            dismissButton = { TextButton(onClick = { restoreTarget = null }) { Text("取消") } },
+            dismissButton = { GlassDialogButton(onClick = { restoreTarget = null }) { Text("取消") } },
         )
     }
 
     folderRestoreTarget?.let { targets ->
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { folderRestoreTarget = null },
             title = { Text(if (targets.size == 1) "移出整个文件夹" else "移出选中的文件夹") },
@@ -813,19 +907,20 @@ fun VaultScreen(navController: NavHostController) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     folderRestoreTarget = null
                     restoreFolders(targets)
-                }) { Text("移出") }
+                }, tone = GlassButtonTone.Danger) { Text("移出") }
             },
-            dismissButton = { TextButton(onClick = { folderRestoreTarget = null }) { Text("取消") } },
+            dismissButton = { GlassDialogButton(onClick = { folderRestoreTarget = null }) { Text("取消") } },
         )
     }
 
     deleteTarget?.let { targets ->
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { deleteTarget = null },
             title = { Text("彻底删除") },
@@ -839,23 +934,24 @@ fun VaultScreen(navController: NavHostController) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     deleteTarget = null
-                    scope.launch {
+                    launchUi {
                         Graph.vault.deletePermanently(targets)
                         message = if (targets.size == 1) "已删除" else "已删除 ${targets.size} 个视频"
                         selection.exit()
                     }
-                }) { Text("删除") }
+                }, tone = GlassButtonTone.Danger) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
+            dismissButton = { GlassDialogButton(onClick = { deleteTarget = null }) { Text("取消") } },
         )
     }
 
     folderDeleteTarget?.let { targets ->
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { folderDeleteTarget = null },
             title = { Text(if (targets.size == 1) "彻底删除文件夹" else "彻底删除选中的文件夹") },
@@ -869,12 +965,12 @@ fun VaultScreen(navController: NavHostController) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     folderDeleteTarget = null
                     deleteFolders(targets)
-                }) { Text("删除") }
+                }, tone = GlassButtonTone.Danger) { Text("删除") }
             },
-            dismissButton = { TextButton(onClick = { folderDeleteTarget = null }) { Text("取消") } },
+            dismissButton = { GlassDialogButton(onClick = { folderDeleteTarget = null }) { Text("取消") } },
         )
     }
 
@@ -882,15 +978,36 @@ fun VaultScreen(navController: NavHostController) {
         fun closeVault() {
             if (disableBusy) return
             disableBusy = true
-            scope.launch {
-                val result = Graph.vault.disable()
-                Graph.local.scan(silent = true)
-                disableBusy = false
-                disableConfirm = false
-                disablePin = ""
-                disableError = null
-                // 失败时 message 里会写清原因（并且门禁仍然保留），成功时是"已移出 N 个"
-                message = result.message
+            // 确认框立刻收起，换成进度弹窗：关闭保险箱要逐个解密，几十秒里停在
+            // 一个带密码框的对话框上，既看不出进展，也分不清到底点没点动。
+            disableConfirm = false
+            disablePin = ""
+            disableError = null
+            val all = entries
+            launchUi {
+                progressTitle = "正在移出保险箱"
+                progressDetail = if (all.isEmpty()) "没有需要移出的视频" else "共 ${all.size} 个视频"
+                progressValue = 0f
+                val report = progressReporter()
+                try {
+                    val result = Graph.vault.disable { index, total, p ->
+                        all.getOrNull(index)?.let { entry ->
+                            val detail = if (total > 1) {
+                                "第 ${index + 1}/$total 个 · ${entry.fileName}"
+                            } else {
+                                entry.fileName
+                            }
+                            if (progressDetail != detail) progressDetail = detail
+                        }
+                        report(((index + p) / total.coerceAtLeast(1)).coerceIn(0f, 1f))
+                    }
+                    Graph.local.scan(silent = true)
+                    // 失败时 message 里会写清原因（并且门禁仍然保留），成功时是"已移出 N 个"
+                    message = result.message
+                } finally {
+                    progressTitle = null
+                    disableBusy = false
+                }
             }
         }
         fun dismissDialog() {
@@ -914,7 +1031,8 @@ fun VaultScreen(navController: NavHostController) {
 
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = { dismissDialog() },
             title = { Text("关闭保险箱") },
@@ -932,12 +1050,11 @@ fun VaultScreen(navController: NavHostController) {
                         style = MaterialTheme.typography.labelMedium,
                     )
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
+                    GlassTextField(
                         value = disablePin,
                         // 与设置/解锁同一套归一：全角数字转半角
                         onValueChange = { disablePin = Graph.vault.normalizePin(it); disableError = null },
-                        label = { Text("密码") },
-                        singleLine = true,
+                        label = "密码",
                         isError = disableError != null,
                         visualTransformation = if (showDisablePin) {
                             VisualTransformation.None
@@ -960,13 +1077,13 @@ fun VaultScreen(navController: NavHostController) {
                     }
                     if (config.biometric) {
                         val act = activity
-                        TextButton(
+                        GlassDialogButton(
                             enabled = act != null && !disableBusy,
                             onClick = {
-                                if (act == null) return@TextButton
+                                if (act == null) return@GlassDialogButton
                                 if (!VaultBiometric.available(context)) {
                                     disableError = "当前设备未录入指纹，请改用密码"
-                                    return@TextButton
+                                    return@GlassDialogButton
                                 }
                                 // 纯身份验证：不碰数据密钥，认证通过即视为机主确认
                                 VaultBiometric.authenticate(
@@ -975,7 +1092,6 @@ fun VaultScreen(navController: NavHostController) {
                                     onError = { if (it.isNotBlank()) disableError = it },
                                 )
                             },
-                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
                         ) {
                             Icon(
                                 Icons.Rounded.Fingerprint,
@@ -989,7 +1105,7 @@ fun VaultScreen(navController: NavHostController) {
                 }
             },
             confirmButton = {
-                TextButton(
+                GlassDialogButton(
                     // 下限与设置页一致（4 位）。之前写死 6，设了 4 位密码的用户
                     // 永远点不亮「关闭」，看起来就是「保险箱关不掉」。
                     enabled = disablePin.length in VaultRepo.MIN_PIN..VaultRepo.MAX_PIN && !disableBusy,
@@ -1008,29 +1124,40 @@ fun VaultScreen(navController: NavHostController) {
                             }
                         }
                     },
+                tone = GlassButtonTone.Danger,
                 ) { Text(if (disableBusy) "处理中…" else "关闭") }
             },
             dismissButton = {
-                TextButton(onClick = { dismissDialog() }, enabled = !disableBusy) { Text("取消") }
+                GlassDialogButton(onClick = { dismissDialog() }, enabled = !disableBusy) { Text("取消") }
             },
         )
     }
 
-    decrypting?.let { entry ->
+    progressTitle?.let { title ->
         AlertDialog(
             shape = RoundedCornerShape(26.dp),
-            containerColor = appGlass().panelStrong,
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            modifier = Modifier.alertDialogGlassSurface(),
             tonalElevation = 0.dp,
             onDismissRequest = {},
-            title = { Text("正在解密") },
+            title = { Text(title) },
             text = {
                 Column {
-                    Text(entry.fileName, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(12.dp))
-                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                    if (progressDetail.isNotBlank()) {
+                        Text(
+                            progressDetail,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    LinearProgressIndicator(
+                        progress = { progressValue },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "${(progress * 100).toInt()}%",
+                        "${(progressValue * 100).toInt()}%",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1288,7 +1415,8 @@ private fun VaultInfoDialog(entry: VaultEntry, onDismiss: () -> Unit) {
     val added = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(entry.addedAt))
     AlertDialog(
         shape = RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
         title = { Text("视频详情") },
@@ -1314,6 +1442,6 @@ private fun VaultInfoDialog(entry: VaultEntry, onDismiss: () -> Unit) {
                 InfoRow("状态", "已加密")
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { GlassDialogButton(onClick = onDismiss) { Text("关闭") } },
     )
 }

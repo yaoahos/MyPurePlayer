@@ -69,11 +69,19 @@ object Graph {
             // 服务器与串流也要一起载入：播放列表/历史里的 SMB 条目要靠 serverId（或 host）
             // 找回服务器配置，没载入就会「地址没变却一直提示打不开」。
             bootScope.launch {
+                // 保险箱的播放缓存是解密出来的明文副本：正常退出播放页会清，
+                // 但进程被杀、崩溃、低内存回收时走不到 onDispose，明文会留在 cacheDir 里。
+                // 冷启动统一清一次，保证新会话开始时没有上一次的残留。
+                vault.clearPlayCache()
                 history.load()
                 progress.load()
                 playlists.load()
                 servers.load()
                 streams.load()
+                // 设置和上面几份 JSON 不同：它几乎每个页面都要用，而且要用于**首帧**
+                // （开关位置、深色模式、网格排列）。这里先读一次填进快照，
+                // 之后的页面用 currentOrNull() 就能直接画出正确的状态，不会先画默认值再跳。
+                settings.warmUp()
             }
         }
     }

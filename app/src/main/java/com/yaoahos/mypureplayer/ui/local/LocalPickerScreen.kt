@@ -124,15 +124,16 @@ fun LocalPickerScreen(navController: NavHostController, folderKey: String, targe
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.weight(1f),
                     )
-                    Button(
+                    com.yaoahos.mypureplayer.ui.components.GlassButton(
+                        text = "加入列表",
                         onClick = {
                             val items = videos.filter { it.id in selected }
-                            if (items.isEmpty()) return@Button
+                            if (items.isEmpty()) return@GlassButton
                             // 不预设目标，交给用户选
                             pendingAdd = items
                         },
                         enabled = selected.isNotEmpty(),
-                    ) { Text("加入列表") }
+                    )
                 }
             }
         },

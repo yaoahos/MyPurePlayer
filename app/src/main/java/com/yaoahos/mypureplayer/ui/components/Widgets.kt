@@ -33,7 +33,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -874,24 +873,30 @@ fun SearchField(
     androidx.compose.runtime.LaunchedEffect(Unit) {
         runCatching { focusRequester.requestFocus() }
     }
-    OutlinedTextField(
+    GlassTextField(
         value = query,
         onValueChange = onQueryChange,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-            .focusRequester(focusRequester),
-        placeholder = { Text(placeholder) },
-        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+        // 搜索框自带语义，不再画一行「搜索」标签；用胶囊形与表单里的方框区分开
+        placeholder = placeholder,
+        leadingIcon = {
+            Icon(
+                Icons.Rounded.Search,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
         trailingIcon = {
             IconButton(onClick = onClose) {
                 Icon(Icons.Rounded.Close, contentDescription = "关闭搜索")
             }
         },
-        singleLine = true,
         shape = RoundedCornerShape(28.dp),
         keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = {}),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .focusRequester(focusRequester),
     )
 }
 
@@ -938,9 +943,9 @@ fun EmptyState(
         )
         if (actionLabel != null && onAction != null) {
             Spacer(Modifier.height(20.dp))
-            androidx.compose.material3.FilledTonalButton(onClick = onAction) {
-                Text(actionLabel)
-            }
+            // 全站按钮 2026-11-25 已统一为玻璃；这里原来是 M3 的 FilledTonalButton
+            // （实色胶囊、自带 M3 水波纹），是空态里唯一没跟上的一处。
+            GlassButton(text = actionLabel, onClick = onAction)
         }
     }
 }

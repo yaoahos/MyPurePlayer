@@ -1,5 +1,7 @@
 package com.yaoahos.mypureplayer.ui.more
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -79,11 +81,12 @@ import com.yaoahos.mypureplayer.ui.components.SortLayoutSheet
 import com.yaoahos.mypureplayer.ui.components.VideoGridCard
 import com.yaoahos.mypureplayer.ui.components.VideoListRow
 import com.yaoahos.mypureplayer.ui.components.adaptiveMediaGridMinSize
-import com.yaoahos.mypureplayer.ui.components.appGlass
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.ui.components.flashClick
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import com.yaoahos.mypureplayer.ui.components.listRowMinSize
 import com.yaoahos.mypureplayer.ui.local.startPlayback
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -132,10 +135,52 @@ fun TrashScreen(navController: NavHostController) {
     // 默认给宫格 —— 本地视频页默认就是宫格，两边打开第一眼是同一个版式。
     var gridMode by rememberSaveable { mutableStateOf(true) }
 
-    LaunchedEffect(Unit) { Graph.trash.load() }
+    LaunchedEffect(Unit) {
+        Graph.trash.load()
+        // 自动清理放在「进入回收站页」而不是冷启动：冷启动时用户在别的页面，
+        // 文件被悄悄删掉却不知道发生了什么；在这里清完能立刻给出提示，
+        // 列表也已经刷新到清理后的样子。
+        val settings = Graph.settings.settings.first()
+        if (settings.trashAutoClean) {
+            val result = Graph.trash.autoClean(settings.trashRetentionDays)
+            if (result.removed > 0) {
+                message = "已自动清理 ${result.removed} 个超过 ${settings.trashRetentionDays} 天" +
+                    "的视频，释放 ${Formats.formatSize(result.freedBytes)}"
+            }
+        }
+    }
+
+    // 存储卡被拔掉时，卡上的条目仍留在列表里（否则会"凭空消失"，插回来才又出现），
+    // 但文件此刻读不到。这里标记出来，避免点开才发现播不了。
+    // 放在 IO 里算：条目多时逐条 stat 也不该占主线程。
+    var missingIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    LaunchedEffect(entries) {
+        missingIds = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            entries.filterNot { Graph.trash.fileOf(it).exists() }.mapTo(HashSet()) { it.id }
+        }
+    }
+    fun unavailable(entry: TrashEntry): Boolean = entry.id in missingIds
+
+    /**
+     * 卡片副标题。
+     *
+     * 读不到文件时把「原来在哪」整段换成原因，而不是在末尾追加 ——
+     * 卡片宽度只够显示两行，追加的提示必然被省略号切掉，用户反而看不到。
+     */
+    fun cardMeta(entry: TrashEntry): String = when {
+        unavailable(entry) && entry.isFolder ->
+            "存储卡未插入 · ${entry.fileCount} 个视频 · ${Formats.formatSize(entry.sizeBytes)}"
+        unavailable(entry) -> "存储卡未插入 · ${Formats.formatSize(entry.sizeBytes)}"
+        entry.isFolder -> folderSubtitle(entry)
+        else -> trashVideoMeta(entry)
+    }
 
     fun entryItem(entry: TrashEntry): VideoItem {
         val file = Graph.trash.fileOf(entry)
+        // 物理文件是随机名 + `.trash`，扩展名不再能说明封装格式：
+        // - `fileName` 仍填原文件名，标题、MIME、缩略图的容器提示都靠它；
+        // - 播放器靠内容嗅探识别封装（LocalStreamServer 的 MIME 同样取 fileName），
+        //   所以这里不能把 uri 里的文件名当成类型依据。
         return VideoItem(
             id = "trash:${entry.id}",
             title = entry.fileName.substringBeforeLast('.', entry.fileName),
@@ -156,6 +201,8 @@ fun TrashScreen(navController: NavHostController) {
     fun onEntryClick(entry: TrashEntry) {
         if (selection.active) {
             selection.toggle(entry.id.toString())
+        } else if (unavailable(entry)) {
+            message = "存储卡未插入，插回后可播放或恢复"
         } else if (!entry.isFolder) {
             // 单击视频 = 播放（与本地/历史/保险箱一致）。先闪一下再跳播放器。
             // 回收站里的文件是完整搬到暂存区的，可直接播放，不必先恢复。
@@ -172,24 +219,47 @@ fun TrashScreen(navController: NavHostController) {
         selection.enter(entry.id.toString())
     }
 
+    /**
+     * 页面上所有「写操作」协程统一从这里起。
+     *
+     * 数据层已经把异常收敛成 Result，但页面协程本身没有异常兜底 —— 只要漏出一个，
+     * 用户看到的就是闪退而不是提示（「恢复完文件就闪退」就是这么发生的）。
+     * 取消信号必须原样抛出：那是页面退出时的正常流程，不该被当成失败提示。
+     */
+    fun launchUi(block: suspend () -> Unit) {
+        scope.launch {
+            try {
+                block()
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                message = t.message?.takeIf { it.isNotBlank() } ?: "操作失败，请重试"
+            }
+        }
+    }
+
     fun restoreEntries(targets: List<TrashEntry>) {
         if (targets.isEmpty()) return
-        scope.launch {
+        launchUi {
             var ok = 0
             val failed = mutableListOf<String>()
-            targets.forEach { entry ->
-                Graph.trash.restore(entry).fold(
-                    onSuccess = { ok++ },
-                    onFailure = { failed += it.message ?: entry.fileName },
-                )
+            try {
+                targets.forEach { entry ->
+                    Graph.trash.restore(entry).fold(
+                        onSuccess = { ok++ },
+                        onFailure = { failed += it.message ?: entry.fileName },
+                    )
+                }
+                Graph.local.scan()
+                message = when {
+                    failed.isEmpty() && ok == 1 -> "已恢复：${targets.first().fileName}"
+                    failed.isEmpty() -> "已恢复 $ok 项"
+                    else -> "已恢复 $ok 项，${failed.size} 项失败：${failed.first()}"
+                }
+            } finally {
+                // 出错也要退出选择态：列表已经变了，底部栏再挂着旧勾选只会让人误操作
+                selection.exit()
             }
-            Graph.local.scan()
-            message = when {
-                failed.isEmpty() && ok == 1 -> "已恢复：${targets.first().fileName}"
-                failed.isEmpty() -> "已恢复 $ok 项"
-                else -> "已恢复 $ok 项，${failed.size} 项失败：${failed.first()}"
-            }
-            selection.exit()
         }
     }
 
@@ -221,7 +291,14 @@ fun TrashScreen(navController: NavHostController) {
                 subtitle = when {
                     selection.active -> "轻点勾选或取消 · 右上角可全选"
                     query.isNotBlank() -> "找到 ${shown.size} 项"
-                    else -> "本地 / 群晖删除的文件"
+                    // 回收站只处理本机文件：网络共享上的视频没有本地路径，删除走的是
+                    // 服务器自己那一套，不会进这里。之前写「本地 / 群晖」是把注释里的
+                    // 兼容说明误写成了界面文案。
+                    entries.isEmpty() -> "删除的本地视频会先放在这里"
+                    // 占用一眼可见：回收站是"暂存"，用户需要知道它到底压着多少空间
+                    else -> "${entries.size} 项 · 占用 ${
+                        Formats.formatSize(entries.sumOf { it.sizeBytes })
+                    }"
                 },
                 onBack = {
                     if (selection.active) {
@@ -347,7 +424,7 @@ fun TrashScreen(navController: NavHostController) {
                         if (entry.isFolder) {
                             MediaFolderGridCard(
                                 name = entry.fileName,
-                                subtitle = folderSubtitle(entry),
+                                subtitle = cardMeta(entry),
                                 onClick = { onEntryClick(entry) },
                                 onLongClick = { onEntryLongClick(entry) },
                                 selected = selection.contains(entry.id.toString()),
@@ -361,7 +438,7 @@ fun TrashScreen(navController: NavHostController) {
                                 onLongClick = { onEntryLongClick(entry) },
                                 selected = selection.contains(entry.id.toString()),
                                 selecting = selection.active,
-                                metaOverride = trashVideoMeta(entry),
+                                metaOverride = cardMeta(entry),
                                 metaMaxLines = 2,
                             )
                         }
@@ -385,7 +462,7 @@ fun TrashScreen(navController: NavHostController) {
                             if (entry.isFolder) {
                                 MediaFolderRow(
                                     name = entry.fileName,
-                                    subtitle = folderSubtitle(entry),
+                                    subtitle = cardMeta(entry),
                                     onClick = { onEntryClick(entry) },
                                     onLongClick = { onEntryLongClick(entry) },
                                     selected = selection.contains(entry.id.toString()),
@@ -399,7 +476,7 @@ fun TrashScreen(navController: NavHostController) {
                                     onLongClick = { onEntryLongClick(entry) },
                                     selected = selection.contains(entry.id.toString()),
                                     selecting = selection.active,
-                                    metaOverride = trashVideoMeta(entry),
+                                    metaOverride = cardMeta(entry),
                                     metaMaxLines = 2,
                                 )
                             }
@@ -453,7 +530,7 @@ fun TrashScreen(navController: NavHostController) {
             destructive = true,
             onConfirm = {
                 deleteTarget = null
-                scope.launch {
+                launchUi {
                     Graph.trash.deletePermanently(targets)
                     message = if (targets.size == 1) "已彻底删除" else "已彻底删除 ${targets.size} 项"
                     selection.exit()
@@ -471,9 +548,11 @@ fun TrashScreen(navController: NavHostController) {
             destructive = true,
             onConfirm = {
                 confirmClear = false
-                scope.launch {
-                    Graph.trash.clear()
-                    message = "回收站已清空"
+                launchUi {
+                    val left = Graph.trash.clear()
+                    // 有删不掉的要如实说：说「已清空」而这些条目下次启动又冒出来，
+                    // 会让用户以为清空功能坏了
+                    message = if (left == 0) "回收站已清空" else "已清空，$left 项因文件被占用没能删除"
                 }
             },
             onDismiss = { confirmClear = false },
@@ -518,7 +597,8 @@ private fun TrashInfoDialog(entry: TrashEntry, onDismiss: () -> Unit) {
         .format(Date(entry.deletedAt))
     AlertDialog(
         shape = RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
         title = { Text(if (entry.isFolder) "文件夹详情" else "视频详情") },
@@ -548,6 +628,6 @@ private fun TrashInfoDialog(entry: TrashEntry, onDismiss: () -> Unit) {
                 InfoRow("删除时间", deletedAt)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { GlassDialogButton(onClick = onDismiss) { Text("关闭") } },
     )
 }

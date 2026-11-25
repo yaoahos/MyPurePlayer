@@ -1,5 +1,10 @@
 package com.yaoahos.mypureplayer.ui.more
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.Dp
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,10 +35,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,13 +68,15 @@ import com.yaoahos.mypureplayer.ui.components.GlassChoiceRow
 import com.yaoahos.mypureplayer.ui.components.Notice
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.GlassButton
+import com.yaoahos.mypureplayer.ui.components.GlassTextField
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PasswordEye
 import com.yaoahos.mypureplayer.ui.components.SectionLabel
-import com.yaoahos.mypureplayer.ui.components.appGlass
+import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -86,7 +91,9 @@ import java.util.Locale
  *  - 云端按设备各存一份（设备名 + 4 位短码），自动备份用页面里填写的密码，
  *    恢复时先列目录、由用户选择要恢复哪台设备的那份。
  *
- * 恢复是覆盖性操作，两条通路都先解密、解析，再弹一次确认框；失败时不会先动当前配置。
+ * 恢复是覆盖性操作，两条通路都先解密、解析，再弹一次确认框；解密/解析失败时不动当前配置。
+ * 写盘阶段若失败则可能只恢复到一半（每段各自的落盘是原子的，段与段之间不是），
+ * 提示只报「恢复失败或恢复不全」——重做一次即可收敛，不必为小概率事件加回滚。
  * 密码不进备份文件，结果提示里列出需要补填的 SMB 项。
  */
 @Composable
@@ -94,26 +101,42 @@ fun BackupScreen(navController: NavHostController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var davUrl by remember { mutableStateOf("") }
-    var davPort by remember { mutableStateOf(ConfigBackup.defaultPort("https").toString()) }
-    var davFolder by remember { mutableStateOf(ConfigBackup.DEFAULT_FOLDER) }
-    var davUser by remember { mutableStateOf("") }
-    var davPassword by remember { mutableStateOf("") }
+    // App 启动时（后台恢复自动备份周期那一步）已经读过一次配置，这里直接同步取：
+    // 8 个输入框第一帧就带真值 —— 不必先画空框再填、也不必先画骨架再换内容
+    // （用户看到的「卡一下 + 残影」正是那两次切换叠在一起）。
+    val seed = remember { BackupPrefs.cachedConfig() }
+    val seedId = remember { BackupPrefs.cachedDeviceIdOrNull() }
+    val seedPort = seed?.let { s ->
+        s.port.ifBlank {
+            ConfigBackup.defaultPort(if (s.url.trim().startsWith("http://", true)) "http" else "https")
+                .toString()
+        }
+    } ?: ConfigBackup.defaultPort("https").toString()
+
+    var davUrl by remember { mutableStateOf(seed?.url.orEmpty()) }
+    var davPort by remember { mutableStateOf(seedPort) }
+    var davFolder by remember {
+        mutableStateOf(seed?.folder?.ifBlank { ConfigBackup.DEFAULT_FOLDER } ?: ConfigBackup.DEFAULT_FOLDER)
+    }
+    var davUser by remember { mutableStateOf(seed?.username.orEmpty()) }
+    var davPassword by remember { mutableStateOf(seed?.password.orEmpty()) }
     var showDavPassword by remember { mutableStateOf(false) }
     // 云端备份口令：落盘（Keystore 加密），定时任务在后台也要能取到
-    var backupPassword by remember { mutableStateOf("") }
+    var backupPassword by remember { mutableStateOf(seed?.backupPassword.orEmpty()) }
     var showBackupPassword by remember { mutableStateOf(false) }
-    var deviceName by remember { mutableStateOf(DeviceProfile.hardwareName()) }
-    var deviceId by remember { mutableStateOf("") }
-    var autoHours by remember { mutableStateOf(WebDavConfig.DEFAULT_AUTO_HOURS) }
-    var lastSyncAt by remember { mutableStateOf(0L) }
-    var lastResult by remember { mutableStateOf("") }
+    var deviceName by remember {
+        mutableStateOf(seed?.let { DeviceProfile.displayName(it.deviceName) } ?: DeviceProfile.hardwareName())
+    }
+    var deviceId by remember { mutableStateOf(seedId.orEmpty()) }
+    var autoHours by remember { mutableStateOf(seed?.autoHours ?: WebDavConfig.DEFAULT_AUTO_HOURS) }
+    var lastSyncAt by remember { mutableStateOf(seed?.lastSyncAt ?: 0L) }
+    var lastResult by remember { mutableStateOf(seed?.lastResult.orEmpty()) }
 
     // 端口被手动改过就不再跟随协议自动切换
-    var portEdited by remember { mutableStateOf(false) }
-    // 设置读完之前不渲染输入框：否则空值先画一次、读盘后再填值，
-    // Material 的 OutlinedTextField 标签会当着用户的面上浮一下。
-    var loaded by remember { mutableStateOf(false) }
+    var portEdited by remember { mutableStateOf(seed?.port?.isNotBlank() == true) }
+    // 只有完全没有缓存时才需要等一次读盘（冷启动后立刻冲进本页）。
+    // 正常路径从设置页点进来，缓存早已就绪，这一页从第一帧就是最终样子。
+    var loaded by remember { mutableStateOf(seed != null) }
     // 只记录「当前正在跑哪个操作」：按钮自己转圈，不再在每张卡片上各画一份「处理中…」。
     var busyOp by remember { mutableStateOf<String?>(null) }
     val busy = busyOp != null
@@ -136,8 +159,9 @@ fun BackupScreen(navController: NavHostController) {
         ConfigBackup.defaultPort(if (url.trim().startsWith("http://", true)) "http" else "https").toString()
 
     LaunchedEffect(Unit) {
-        // DataStore 首次读 + Keystore 解密 + 短码生成都在这里；放到 IO 线程池，
-        // 避免进页面第一帧被加密/磁盘操作卡住（用户反馈「进入配置备份有些卡顿」）。
+        // 缓存已就绪时这里读到的值与首帧完全一致，赋值不会触发重组（Compose 的
+        // MutableState 相同值直接跳过）。它只兜一种情况：冷启动后立刻进本页，
+        // 缓存还没填上 —— 那时才真正读一次盘（含 Keystore 解密）。
         val (saved, id) = withContext(Dispatchers.IO) {
             BackupPrefs.get(context) to BackupPrefs.deviceId(context)
         }
@@ -344,30 +368,30 @@ fun BackupScreen(navController: NavHostController) {
             )
         },
     ) { padding ->
+        // 数据在首帧就绪时，这一页第一帧就是最终样子：没有骨架、没有交叉淡化。
+        //
+        // 上一版用 Crossfade 在「骨架 → 内容」之间淡了 120ms，两层同时在场 ——
+        // 灰色占位条与真实文字叠在一起，用户看到的就是「残影」；而且切换那一帧要
+        // 一次性组合全部输入框，掉在转场动画里就是「进去卡一下」。
+        // 现在只在真正没有缓存时（冷启动直接进本页）才画骨架，读完后直接替换。
         if (!loaded) {
-            // 先等 DataStore + Keystore 一次读完再进场：输入框带着真实值首帧出现，
-            // 标签不会再从中间浮到顶部（用户反馈的「进页面文字上浮一下」）。
-            Box(
-                Modifier.padding(padding).fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "正在读取备份设置…",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            BackupSkeleton(Modifier.padding(padding))
         } else {
-        Column(
+        // LazyColumn 在这里不只是"长列表懒加载"：首屏只组合能看见的卡片，
+        // 剩下的表单滚到可见时才组合，把成本摊到滚动时（用户已经在动）。
+        androidx.compose.foundation.lazy.LazyColumn(
             Modifier
                 .padding(padding)
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
                 // adjustResize 只缩窗口；不跟着 ime 内缩的话，输入框正好落在输入法底下
-                .imePadding()
-                .padding(horizontal = 16.dp),
+                .imePadding(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                horizontal = 16.dp,
+                vertical = 8.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            item {
             BackupGroup("备份范围") {
                 NoteBlock(
                     icon = {
@@ -384,7 +408,9 @@ fun BackupScreen(navController: NavHostController) {
                         "恢复会覆盖 SMB、串流、历史、正在播放与自建列表；换设备后本地视频路径可能失效",
                 )
             }
+            }
 
+            item {
             BackupGroup("本机文件") {
                 BackupActionRow(
                     title = "备份到本机",
@@ -402,18 +428,18 @@ fun BackupScreen(navController: NavHostController) {
                     onClick = { pickLocal.launch(arrayOf("*/*")) },
                 )
             }
+            }
 
+            item {
             BackupGroup("WebDAV") {
-                OutlinedTextField(
+                GlassTextField(
                     value = davUrl,
                     onValueChange = {
                         davUrl = it
                         if (!portEdited) davPort = defaultPortOf(it)
                     },
-                    label = { Text("地址") },
-                    placeholder = { Text("dav.example.com/dav") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    label = "地址",
+                    placeholder = "dav.example.com/dav",
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp),
                 )
@@ -421,41 +447,34 @@ fun BackupScreen(navController: NavHostController) {
                     Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedTextField(
+                    GlassTextField(
                         value = davPort,
                         onValueChange = {
                             davPort = it.filter(Char::isDigit).take(5)
                             portEdited = true
                         },
-                        label = { Text("端口") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
+                        label = "端口",
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.width(108.dp),
                     )
-                    OutlinedTextField(
+                    GlassTextField(
                         value = davFolder,
                         onValueChange = { davFolder = it },
-                        label = { Text("目录") },
-                        placeholder = { Text(ConfigBackup.DEFAULT_FOLDER) },
-                        singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
+                        label = "目录",
+                        placeholder = ConfigBackup.DEFAULT_FOLDER,
                         modifier = Modifier.weight(1f),
                     )
                 }
-                OutlinedTextField(
+                GlassTextField(
                     value = davUser,
                     onValueChange = { davUser = it },
-                    label = { Text("账号") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                    label = "账号",
+                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp),
                 )
-                OutlinedTextField(
+                GlassTextField(
                     value = davPassword,
                     onValueChange = { davPassword = it },
-                    label = { Text("密码") },
-                    singleLine = true,
+                    label = "密码",
                     visualTransformation = if (showDavPassword) {
                         VisualTransformation.None
                     } else {
@@ -464,8 +483,7 @@ fun BackupScreen(navController: NavHostController) {
                     trailingIcon = {
                         PasswordEye(showDavPassword) { showDavPassword = !showDavPassword }
                     },
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp),
                 )
                 if (davUrl.trim().startsWith("http://", true)) {
                     Text(
@@ -481,39 +499,36 @@ fun BackupScreen(navController: NavHostController) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp),
                 )
-                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
-                    Row(
-                        Modifier.align(Alignment.CenterEnd),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        GlassButton(
-                            text = "测试",
-                            loading = busyOp == "测试",
-                            onClick = {
-                                if (busy || !hasBase()) return@GlassButton
-                                scope.launch {
-                                    busyOp = "测试"
-                                    // 测试只验证当前输入框里的值；失败不应覆盖已保存的连接
-                                    val r = runCatching {
-                                        withContext(Dispatchers.IO) {
-                                            WebDavClient.check(base(), davUser, davPassword)
-                                        }
+                BackupButtonRow {
+                    GlassButton(
+                        text = "测试",
+                        loading = busyOp == "测试",
+                        onClick = {
+                            if (busy || !hasBase()) return@GlassButton
+                            scope.launch {
+                                busyOp = "测试"
+                                // 测试只验证当前输入框里的值；失败不应覆盖已保存的连接
+                                val r = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        WebDavClient.check(base(), davUser, davPassword)
                                     }
-                                    busyOp = null
-                                    r.onSuccess { Notice.success("连接正常，记得点「保存」") }
-                                        .onFailure { Notice.error(it.message ?: "连接失败") }
                                 }
-                            },
-                        )
-                        GlassButton(
-                            text = "保存",
-                            loading = busyOp == "保存",
-                            onClick = { if (!busy) saveConnection() },
-                        )
-                    }
+                                busyOp = null
+                                r.onSuccess { Notice.success("连接正常，记得点「保存」") }
+                                    .onFailure { Notice.error(it.message ?: "连接失败") }
+                            }
+                        },
+                    )
+                    GlassButton(
+                        text = "保存",
+                        loading = busyOp == "保存",
+                        onClick = { if (!busy) saveConnection() },
+                    )
                 }
             }
+            }
 
+            item {
             BackupGroup("云端备份") {
                 NoteBlock(
                     icon = {
@@ -529,13 +544,11 @@ fun BackupScreen(navController: NavHostController) {
                         "WebDAV 连接修改后点「保存」生效，测试只验证不保存；保存不会当场上传，" +
                         "第一次备份要等自动备份周期到点，手动上传请点「上传」。",
                 )
-                OutlinedTextField(
+                GlassTextField(
                     value = backupPassword,
                     onValueChange = { backupPassword = it },
-                    label = { Text("备份密码") },
-                    placeholder = { Text("至少 ${BackupCrypto.MIN_PASSWORD} 位") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    label = "备份密码",
+                    placeholder = "至少 ${BackupCrypto.MIN_PASSWORD} 位",
                     visualTransformation = if (showBackupPassword) {
                         VisualTransformation.None
                     } else {
@@ -549,14 +562,12 @@ fun BackupScreen(navController: NavHostController) {
                     },
                     modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp),
                 )
-                OutlinedTextField(
+                GlassTextField(
                     value = deviceName,
                     onValueChange = { deviceName = it },
-                    label = { Text("设备名称") },
-                    placeholder = { Text(DeviceProfile.hardwareName()) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                    label = "设备名称",
+                    placeholder = DeviceProfile.hardwareName(),
+                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp),
                 )
                 if (deviceId.isNotBlank()) {
                     Text(
@@ -585,26 +596,22 @@ fun BackupScreen(navController: NavHostController) {
                     enabled = !busy,
                     onClick = { autoDialogOpen = true },
                 )
-                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
-                    Row(
-                        Modifier.align(Alignment.CenterEnd),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        GlassButton(
-                            text = "上传",
-                            loading = busyOp == "上传",
-                            onClick = { if (!busy) uploadCloud() },
-                        )
-                        GlassButton(
-                            text = "恢复",
-                            loading = busyOp == "恢复",
-                            onClick = { if (!busy) loadCloudList() },
-                        )
-                    }
+                BackupButtonRow {
+                    GlassButton(
+                        text = "上传",
+                        loading = busyOp == "上传",
+                        onClick = { if (!busy) uploadCloud() },
+                    )
+                    GlassButton(
+                        text = "恢复",
+                        loading = busyOp == "恢复",
+                        onClick = { if (!busy) loadCloudList() },
+                    )
                 }
             }
+            }
 
-            Spacer(Modifier.height(24.dp))
+            item { Spacer(Modifier.height(24.dp)) }
         }
         }
     }
@@ -745,10 +752,15 @@ fun BackupScreen(navController: NavHostController) {
                 pending = null
                 scope.launch {
                     busyOp = "恢复配置"
-                    val result = runCatching { ConfigBackup.restore(payload) }
+                    val result = runCatching {
+                        // 中途按返回键会取消页面协程，恢复会停在「写了几类」的中间状态，
+                        // 而且连提示都弹不出来。已经落盘的部分撤不回来，干脆让它跑完，
+                        // 最坏也只是全部成功一次。
+                        withContext(NonCancellable) { ConfigBackup.restore(payload) }
+                    }
                     busyOp = null
                     result.onSuccess { reportResult(it) }
-                        .onFailure { Notice.error(it.message ?: "恢复失败") }
+                        .onFailure { Notice.error("恢复失败或恢复不全，请重新恢复") }
                 }
             },
             onDismiss = { pending = null },
@@ -790,7 +802,9 @@ private fun AutoBackupRow(
         Modifier
             .fillMaxWidth()
             .glassPressable(enabled = enabled, radius = 12.dp, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            // 下边距交给紧随其后的 [BackupButtonRow]：这里再留 14dp 会与按钮行的
+            // 12dp 叠成 26dp，同一页两组按钮的上距就对不上了
+            .padding(start = 16.dp, end = 16.dp, top = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -806,6 +820,23 @@ private fun AutoBackupRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+/**
+ * 卡片内的操作按钮行（测试/保存、上传/恢复）。
+ *
+ * 上下留白收在这一处，不让调用方各写一份：早先「测试/保存」是 `vertical = 10.dp`、
+ * 「上传/恢复」是 `vertical = 4.dp`，而后者上方又是内建 14dp 底边距的自动备份行 ——
+ * 结果一组悬在卡片中间、另一组几乎贴着底边，同页两组按钮看着像两种层级。
+ */
+@Composable
+private fun BackupButtonRow(content: @Composable () -> Unit) {
+    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp)) {
+        Row(
+            Modifier.align(Alignment.CenterEnd),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) { content() }
     }
 }
 
@@ -832,17 +863,17 @@ private fun PasswordDialog(
 
     AlertDialog(
         shape = RoundedCornerShape(26.dp),
-        containerColor = appGlass().panelStrong,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
             Column {
-                OutlinedTextField(
+                GlassTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("密码") },
-                    singleLine = true,
+                    label = "密码",
                     visualTransformation = if (showPassword) {
                         VisualTransformation.None
                     } else {
@@ -853,12 +884,11 @@ private fun PasswordDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (repeat) {
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
+                    Spacer(Modifier.height(12.dp))
+                    GlassTextField(
                         value = again,
                         onValueChange = { again = it },
-                        label = { Text("再输入一次") },
-                        singleLine = true,
+                        label = "再输入一次",
                         visualTransformation = if (showAgain) {
                             VisualTransformation.None
                         } else {
@@ -890,7 +920,7 @@ private fun PasswordDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(password) }, enabled = valid && !busy) {
+            GlassDialogButton(onClick = { onConfirm(password) }, enabled = valid && !busy, tone = GlassButtonTone.Accent) {
                 if (busy) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(16.dp),
@@ -902,8 +932,63 @@ private fun PasswordDialog(
                 }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { GlassDialogButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/**
+ * 备份页的加载骨架：与真实布局同构的三张卡片（备份范围 / 本机文件 / 云端）。
+ *
+ * 正常情况下用不到它：配置在 App 启动时已经读过一次并留在 [BackupPrefs] 里，
+ * 页面首帧直接就是真实内容。它只兜「冷启动后立刻冲进本页」那一次读盘 ——
+ * 那时的骨架让转场第一帧就已经是"这一页"，而不是空页。
+ *
+ * 读完后**直接换成内容**，不做交叉淡化：两层同时在场会露出灰色占位条压在文字下的重影。
+ */
+@Composable
+private fun BackupSkeleton(modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .fillMaxSize()
+            // 横屏时三张卡的总高会超过可视区，骨架也不能被裁掉半张
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        SkeletonCard(titleWidth = 0.22f, lines = 4, height = 168.dp)
+        SkeletonCard(titleWidth = 0.26f, lines = 2, height = 136.dp)
+        SkeletonCard(titleWidth = 0.30f, lines = 3, height = 200.dp)
+    }
+}
+
+/** 单张骨架卡：与 [BackupGroup] 同一种玻璃卡，内部用几条低对比灰条表示文字行 */
+@Composable
+private fun SkeletonCard(titleWidth: Float, lines: Int, height: Dp) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .height(height)
+            .appGlassSurface(RoundedCornerShape(PageMetrics.CardRadius), elevation = 0.dp)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(titleWidth)
+                .height(12.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)),
+        )
+        repeat(lines) { index ->
+            Box(
+                Modifier
+                    .fillMaxWidth(if (index % 2 == 0) 0.92f else 0.68f)
+                    .height(9.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)),
+            )
+        }
+    }
 }
 
 @Composable

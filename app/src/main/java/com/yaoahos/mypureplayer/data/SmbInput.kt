@@ -37,9 +37,17 @@ object SmbInput {
         // 反斜杠统一成斜杠
         s = s.replace('\\', '/')
 
-        // 内嵌凭据 user:pass@host
-        val at = s.lastIndexOf('@')
-        if (at >= 0) s = s.substring(at + 1)
+        // 内嵌凭据 user:pass@host —— 只可能出现在 authority 段（host 之前）。
+        //
+        // 不能在整串里找 '@'：路径里的 '@' 属于文件名（发布组标记很常见，
+        // 如 `...DV-DIY@HDSWEB.mkv`、`[7³ACG@OurBits]`）。整串切会把 host 与共享名
+        // 一起丢掉，解析结果变成 host="HDSWEB.mkv"、共享名为空，于是这条视频被
+        // 判成「网络位置已移除」—— 同一个目录里只有带 '@' 的那几集播不了。
+        val slash = s.indexOf('/')
+        val authority = if (slash >= 0) s.substring(0, slash) else s
+        val rest = if (slash >= 0) s.substring(slash) else ""
+        val at = authority.lastIndexOf('@')
+        if (at >= 0) s = authority.substring(at + 1) + rest
 
         s = s.trim('/')
         if (s.isEmpty()) return Parsed("", "")

@@ -21,13 +21,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -38,6 +38,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,6 +70,7 @@ import com.yaoahos.mypureplayer.ui.components.SectionLabel
 import com.yaoahos.mypureplayer.ui.components.appGlassSurface
 import com.yaoahos.mypureplayer.ui.components.appGlass
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.launchUi
 import com.yaoahos.mypureplayer.ui.theme.DynamicColorStatus
 import com.yaoahos.mypureplayer.ui.theme.ThemeRuntime
 import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
@@ -79,10 +81,24 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(navController: NavHostController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
-    var cacheSize by remember { mutableStateOf(Thumbnails.diskUsage(context)) }
+    // 保留 null：见下方 if —— 真实设置还没读到时不能先画默认值，
+    // 否则「硬件解码」这种被用户改过的开关会从默认位置滑到真实位置。
+    val settingsState by Graph.settings.settings.collectAsStateWithLifecycle(
+        initialValue = Graph.settings.currentOrNull(),
+    )
+    val settings = settingsState ?: AppSettings()
+    // 缓存目录里可能几万个缩略图文件，listFiles + 逐项 length() 全是系统调用。
+    // 不能在 remember 初值里同步做（那是组合期、主线程），否则每次进设置页都先卡一下；
+    // 放到 IO 里算完再填。
+    var cacheSize by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        cacheSize = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            Thumbnails.diskUsage(context)
+        }
+    }
     var confirmClearCache by remember { mutableStateOf(false) }
     var playModeDialog by remember { mutableStateOf(false) }
+    var trashDaysDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         // 透明容器：背景由根部的常驻玻璃层统一绘制，内部页面与底栏页共用同一张底
@@ -99,6 +115,12 @@ fun SettingsScreen(navController: NavHostController) {
             )
         },
     ) { padding ->
+        if (settingsState == null) {
+            // 只在冷启动后立刻冲进设置页的极短窗口里出现（正常路径从「更多」点进来，
+            // 启动预热早已完成）。画几张空卡片而不是先渲染控件：宁可晚一帧出内容，
+            // 也不要让开关/选中环先按默认值画一遍再滑过去。
+            SettingsLoading(Modifier.padding(padding))
+        } else {
         Column(
             Modifier
                 .padding(padding)
@@ -120,7 +142,7 @@ fun SettingsScreen(navController: NavHostController) {
                     listOf(0 to "跟随系统", 1 to "浅色", 2 to "深色").forEach { (value, label) ->
                         FilterChip(
                             selected = settings.darkMode == value,
-                            onClick = { scope.launch { Graph.settings.setDarkMode(value) } },
+                            onClick = { scope.launchUi { Graph.settings.setDarkMode(value) } },
                             label = { Text(label) },
                         )
                     }
@@ -157,7 +179,7 @@ fun SettingsScreen(navController: NavHostController) {
                     selected = ThemePalette.fromKey(settings.themePalette),
                     dimmed = settings.dynamicColor,
                     onSelect = {
-                        scope.launch {
+                        scope.launchUi {
                             Graph.settings.setThemePalette(it.key)
                             // 选了固定配色就关掉动态取色，否则选了没反应
                             if (settings.dynamicColor) Graph.settings.setDynamicColor(false)
@@ -168,7 +190,7 @@ fun SettingsScreen(navController: NavHostController) {
                     title = "动态取色",
                     subtitle = "跟随壁纸取色（Android 12 及以上）。开启后会覆盖上面的主题色",
                     checked = settings.dynamicColor,
-                    onCheckedChange = { scope.launch { Graph.settings.setDynamicColor(it) } },
+                    onCheckedChange = { scope.launchUi { Graph.settings.setDynamicColor(it) } },
                 )
                 // 开了但没生效时说清原因，并且明确"现在用的是哪套配色" ——
                 // 静默回落到自选色会让人以为开关坏了
@@ -215,19 +237,19 @@ fun SettingsScreen(navController: NavHostController) {
                     title = "自动加载同名字幕",
                     subtitle = "播放时自动加载同目录下的同名字幕",
                     checked = settings.autoLoadSubtitle,
-                    onCheckedChange = { scope.launch { Graph.settings.setAutoLoadSubtitle(it) } },
+                    onCheckedChange = { scope.launchUi { Graph.settings.setAutoLoadSubtitle(it) } },
                 )
                 SettingsSwitchRow(
                     title = "硬件解码",
                     subtitle = "关闭后使用软件解码，兼容性更好但更耗电",
                     checked = settings.hardwareDecode,
-                    onCheckedChange = { scope.launch { Graph.settings.setHardwareDecode(it) } },
+                    onCheckedChange = { scope.launchUi { Graph.settings.setHardwareDecode(it) } },
                 )
                 SettingsSwitchRow(
                     title = "记忆播放进度",
                     subtitle = "从历史记录中的上次位置继续播放",
                     checked = settings.resumePlayback,
-                    onCheckedChange = { scope.launch { Graph.settings.setResumePlayback(it) } },
+                    onCheckedChange = { scope.launchUi { Graph.settings.setResumePlayback(it) } },
                 )
                 // 无痕放在「记忆播放进度」下方：两者都是「记不记」的事，挨着读得通
                 SettingsSwitchRow(
@@ -235,7 +257,7 @@ fun SettingsScreen(navController: NavHostController) {
                     subtitle = "不记录新的观看历史与播放进度，已有记录不受影响",
                     checked = settings.incognito,
                     onCheckedChange = {
-                        scope.launch { Graph.settings.setIncognito(it) }
+                        scope.launchUi { Graph.settings.setIncognito(it) }
                         Notice.success(if (it) "已开启无痕播放" else "已关闭无痕播放")
                     },
                 )
@@ -243,11 +265,42 @@ fun SettingsScreen(navController: NavHostController) {
                     title = "回到桌面时开启小窗",
                     subtitle = "播放中回到桌面时自动进入画中画",
                     checked = settings.pipOnHome,
-                    onCheckedChange = { scope.launch { Graph.settings.setPipOnHome(it) } },
+                    onCheckedChange = { scope.launchUi { Graph.settings.setPipOnHome(it) } },
                 )
             }
 
             SettingsGroup("存储") {
+                SettingsSwitchRow(
+                    title = "回收站自动清理",
+                    subtitle = "超过保留天数、且回收站占用超过 2GB 时，从最旧的开始清理",
+                    checked = settings.trashAutoClean,
+                    onCheckedChange = { scope.launchUi { Graph.settings.setTrashAutoClean(it) } },
+                )
+                // 天数只在开关打开时露出：关着的时候它没有任何作用，摆在那里只会让人以为还在清理
+                if (settings.trashAutoClean) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .glassPressable(onClick = { trashDaysDialog = true })
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("保留天数", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                "删除超过 ${settings.trashRetentionDays} 天的视频",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            "${settings.trashRetentionDays} 天",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -295,6 +348,7 @@ fun SettingsScreen(navController: NavHostController) {
 
             Spacer(Modifier.height(24.dp))
         }
+        }
     }
 
     if (playModeDialog) {
@@ -314,8 +368,36 @@ fun SettingsScreen(navController: NavHostController) {
                     onClick = {
                         playModeDialog = false
                         if (settings.playMode != mode) {
-                            scope.launch { Graph.settings.setPlayMode(mode) }
+                            scope.launchUi { Graph.settings.setPlayMode(mode) }
                             Notice.success("已设为${PlayModes.label(mode)}")
+                        }
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+    }
+
+    // 保留天数只给三档：自定义天数对用户没有实际意义，还会让「超过多少天」的提示变得不确定。
+    // 三档属于互斥单选，与「播放顺序」完全同类，因此复用同一套玻璃选项弹窗，
+    // 而不是再手搓一个只有文字行的 AlertDialog。
+    if (trashDaysDialog) {
+        GlassChoiceDialog(title = "回收站保留天数", onDismiss = { trashDaysDialog = false }) {
+            listOf(
+                30 to "空间紧张时优先清理",
+                60 to "兼顾空间与回看",
+                90 to "尽量多留一段时间",
+            ).forEach { (days, hint) ->
+                GlassChoiceRow(
+                    icon = Icons.Rounded.DeleteSweep,
+                    title = "$days 天",
+                    subtitle = hint,
+                    selected = settings.trashRetentionDays == days,
+                    onClick = {
+                        trashDaysDialog = false
+                        if (settings.trashRetentionDays != days) {
+                            scope.launchUi { Graph.settings.setTrashRetentionDays(days) }
+                            Notice.success("保留天数已设为 $days 天")
                         }
                     },
                 )
@@ -345,6 +427,27 @@ fun SettingsScreen(navController: NavHostController) {
         )
     }
 
+}
+
+@Composable
+private fun SettingsLoading(modifier: Modifier = Modifier) {
+    // 只铺卡片底、不画任何控件：这是「设置还没读到」的占位，不是骨架屏。
+    // 占位时间通常不到一帧（启动预热已经在跑），所以不必做灰条动画。
+    Column(
+        modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(232.dp, 264.dp, 190.dp).forEach { h ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .height(h)
+                    .appGlassSurface(RoundedCornerShape(PageMetrics.CardRadius)),
+            ) {}
+        }
+    }
 }
 
 @Composable

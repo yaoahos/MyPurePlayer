@@ -272,13 +272,13 @@ fun SortLayoutSheet(
             // 按钮固定在面板底部：横屏滚动选项时它始终可见
             Spacer(Modifier.height(12.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onDismiss) { Text("取消") }
+                GlassDialogButton(onClick = onDismiss) { Text("取消") }
                 Spacer(Modifier.size(8.dp))
-                TextButton(onClick = {
+                GlassDialogButton(onClick = {
                     onApply(grid, key, ascending)
                     if (browseMode != null) onApplyBrowseMode?.invoke(mode)
                     onDismiss()
-                }) { Text("确定") }
+                }, tone = GlassButtonTone.Accent) { Text("确定") }
             }
         }
     }

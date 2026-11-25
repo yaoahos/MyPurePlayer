@@ -1,5 +1,8 @@
 package com.yaoahos.mypureplayer.ui.network
 
+import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
+import com.yaoahos.mypureplayer.ui.components.GlassTextField
+import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
 import com.yaoahos.mypureplayer.ui.HideShellBottomBar
 
 import androidx.activity.compose.BackHandler
@@ -88,10 +91,12 @@ import com.yaoahos.mypureplayer.ui.components.MediaSortDraft
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
 import com.yaoahos.mypureplayer.ui.components.Notice
+import com.yaoahos.mypureplayer.ui.components.launchUi
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.PasswordEye
 import com.yaoahos.mypureplayer.ui.components.PullRefreshBox
+import com.yaoahos.mypureplayer.ui.components.ScrollableFill
 import com.yaoahos.mypureplayer.ui.components.SearchField
 import com.yaoahos.mypureplayer.ui.components.SortLayoutSheet
 import com.yaoahos.mypureplayer.ui.components.SelectionBadge
@@ -106,7 +111,9 @@ fun NetworkScreen(navController: NavHostController) {
     val scope = rememberCoroutineScope()
     val servers by Graph.servers.servers.collectAsStateWithLifecycle()
     val settings by Graph.settings.settings.collectAsStateWithLifecycle(
-        initialValue = com.yaoahos.mypureplayer.data.AppSettings(),
+        // 首帧就要正确的排列方式：默认值是「网格」，用户若设成列表，
+        // 先画网格再切成列表会看到整页重排
+        initialValue = Graph.settings.currentOrNull() ?: com.yaoahos.mypureplayer.data.AppSettings(),
     )
 
     var sheetOpen by remember { mutableStateOf(false) }
@@ -239,7 +246,7 @@ fun NetworkScreen(navController: NavHostController) {
                         // 用于同一台 NAS 换不同目录/账号，不必从头再填一遍。
                         SelectionAction(Icons.Rounded.FileCopy, "创建副本", enabled = canAct) {
                             val targets = selectedServers.toList()
-                            scope.launch {
+                            scope.launchUi {
                                 targets.forEach { s -> Graph.servers.upsert(s.copy(id = 0L, name = "${s.name}-副本")) }
                                 Notice.success(
                                     if (targets.size == 1) "已创建副本" else "已创建 ${targets.size} 个副本",
@@ -260,7 +267,7 @@ fun NetworkScreen(navController: NavHostController) {
         Box(Modifier.padding(padding).fillMaxSize()) {
         PullRefreshBox(
             isRefreshing = refreshing,
-            onRefresh = { scope.launch { reload() } },
+            onRefresh = { scope.launchUi { reload() } },
             modifier = Modifier.fillMaxSize(),
         ) {
         Column(Modifier.fillMaxSize()) {
@@ -273,15 +280,19 @@ fun NetworkScreen(navController: NavHostController) {
                 )
             }
             if (filtered.isEmpty()) {
-                EmptyState(
-                    icon = Icons.Rounded.Cloud,
-                    title = if (servers.isEmpty()) "还没有网络共享" else "没有匹配的共享",
-                    message = if (servers.isEmpty()) {
-                        "支持 SMB2 / SMB3。点右下角 + 添加 NAS 或电脑共享后，这里只展示视频文件。"
-                    } else {
-                        "换个关键词试试。"
-                    },
-                )
+                // 空态也要能下拉：这一页的下拉是「重新加载共享列表」，
+                // 空列表恰恰是最需要重载的时候。纯 Column 收不到 nestedScroll 手势。
+                ScrollableFill {
+                    EmptyState(
+                        icon = Icons.Rounded.Cloud,
+                        title = if (servers.isEmpty()) "还没有网络共享" else "没有匹配的共享",
+                        message = if (servers.isEmpty()) {
+                            "支持 SMB2 / SMB3。点右下角 + 添加 NAS 或电脑共享后，这里只展示视频文件。"
+                        } else {
+                            "换个关键词试试。"
+                        },
+                    )
+                }
             } else if (gridMode) {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = adaptiveMediaGridMinSize()),
@@ -355,7 +366,7 @@ fun NetworkScreen(navController: NavHostController) {
             confirmText = "删除",
             destructive = true,
             onConfirm = {
-                scope.launch {
+                scope.launchUi {
                     targets.forEach {
                         SmbClient.invalidate(it.id)
                         Graph.servers.delete(it.id)
@@ -396,7 +407,7 @@ fun NetworkScreen(navController: NavHostController) {
                 sortName = key.name
                 ascending = asc
                 sortDraft = null
-                scope.launch { Graph.settings.setNetworkLayout(grid, key.name, asc) }
+                scope.launchUi { Graph.settings.setNetworkLayout(grid, key.name, asc) }
             },
         )
     }
@@ -650,7 +661,7 @@ private fun ServerEditSheet(
                     testState = false to "请先填写服务器地址"
                 } else {
                     testing = true
-                    scope.launch {
+                    scope.launchUi {
                         val result = SmbClient.test(draft)
                         testing = false
                         // 结果只落在弹窗内的结果位，不再往页面上叠提示
@@ -719,12 +730,15 @@ private fun ServerEditSheet(
                 Modifier.fillMaxWidth().padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                TextButton(
+                GlassDialogButton(
                     onClick = runTest,
                     modifier = Modifier.weight(1f),
+                    // 「测试」是次要动作，把强调色留给「保存」
+                    tone = GlassButtonTone.Neutral,
                 ) { Text(if (testing) "测试中…" else "测试连接") }
 
-                androidx.compose.material3.Button(
+                com.yaoahos.mypureplayer.ui.components.GlassButton(
+                    text = "保存",
                     onClick = {
                         val draft = buildServer(initial, name, host, share, user, password)
                         if (draft == null) {
@@ -732,7 +746,7 @@ private fun ServerEditSheet(
                             // 校验结果必须写在输入框下方才看得见 —— 与「测试连接」同一套路
                             testState = false to "请先填写服务器地址"
                         } else {
-                            scope.launch {
+                            scope.launchUi {
                                 SmbClient.invalidate(draft.id)
                                 Graph.servers.upsert(draft)
                                 Notice.success(if (initial == null) "已添加共享" else "已保存修改")
@@ -741,7 +755,7 @@ private fun ServerEditSheet(
                         }
                     },
                     modifier = Modifier.weight(1f),
-                ) { Text("保存") }
+                )
             }
         }
     }
@@ -773,7 +787,6 @@ private fun buildServer(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun OutlinedInput(
     value: String,
@@ -788,17 +801,15 @@ private fun OutlinedInput(
     keyboardActions: androidx.compose.foundation.text.KeyboardActions =
         androidx.compose.foundation.text.KeyboardActions.Default,
 ) {
-    androidx.compose.material3.OutlinedTextField(
+    GlassTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text(label) },
-        placeholder = placeholder?.let { { Text(it) } },
-        singleLine = true,
+        label = label,
+        placeholder = placeholder,
         visualTransformation = visualTransformation,
         trailingIcon = trailing,
         keyboardOptions = keyboardOptions,
         keyboardActions = keyboardActions,
-        shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth(),
     )
 }
