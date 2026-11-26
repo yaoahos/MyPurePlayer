@@ -75,11 +75,21 @@ object SmbClient {
         // 建连（最长 20s 的 TCP 握手）放在 map 之外做，再用 putIfAbsent 原子登记：
         // computeIfAbsent 会把建连关进桶锁，同 key 并发请求会被一起阻塞到超时。
         var conn = map[key]
-        if (conn == null) {
+        if (conn == null || !conn.isAlive) {
+            // 缓存的连接可能已被 NAS 单方面断开（休眠唤醒、Wi-Fi 切换）。
+            // 拿这种「死连接」去做读写，要等满读写超时（几十秒）才抛 TransportException，
+            // 表现就是历史里点开视频转圈很久。取用时先探活，死的直接换一条。
+            val stale = conn
             val fresh = SmbConnection.open(server)
-            val raced = map.putIfAbsent(key, fresh)
+            val raced = if (stale == null) {
+                map.putIfAbsent(key, fresh)
+            } else if (map.replace(key, stale, fresh)) {
+                runCatching { stale.close() }
+                null
+            } else {
+                map[key]
+            }
             if (raced != null) {
-                // 别的线程先建好了：关掉自己这条多余的，用对方的
                 runCatching { fresh.close() }
                 conn = raced
             } else {

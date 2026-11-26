@@ -112,7 +112,10 @@ internal class SmbConnection(
          * - 关闭 DFS：家用共享不需要 DFS 引用，开着会让根目录枚举挂住（沿用旧实现的取舍）；
          * - 关闭目录租约：租约会让「别人改了目录」的可见性变复杂，浏览场景不需要；
          * - 缓冲：读 1MB，配合上层 512KB 的分块读，尽量把往返压到最少；
-         * - 超时：连接 20s、读写 60s，与旧实现一致，NAS 休眠唤醒时不会立刻失败。
+         * - 超时：握手 20s、读写 60s。读写必须留足 60s：smbj 的 soTimeout 同时是后台
+         *   读线程的静默窗口，一旦 25s 没收到包，smbj 会自己把 socket 关掉——健康的
+         *   空闲连接被误判成死连接，下一次列目录/播放又走一遍 20s 握手。半开连接靠
+         *   isTransportFailure 的异常重建处理，不靠缩短这个窗口。
          */
         fun buildConfig(): SmbConfig = SmbConfig.builder()
             .withDialects(

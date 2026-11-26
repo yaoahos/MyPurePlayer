@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.Settings
 import com.yaoahos.mypureplayer.core.Formats
+import com.yaoahos.mypureplayer.media.Thumbnails
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -150,6 +151,7 @@ object FileOps {
                     IllegalStateException("重命名失败，请开启「所有文件访问权限」"),
                 )
             }
+            Thumbnails.moveCacheKey(context, path, target.absolutePath)
             scan(context, path, target.absolutePath)
             Result.success(target.absolutePath)
         }
@@ -190,6 +192,7 @@ object FileOps {
                 runCatching { target.delete() }
                 return@withContext Result.failure(IllegalStateException("移动失败，请检查写入权限"))
             }
+            Thumbnails.moveCacheKey(context, path, target.absolutePath)
             scan(context, path, target.absolutePath)
             Result.success(target.absolutePath)
         }

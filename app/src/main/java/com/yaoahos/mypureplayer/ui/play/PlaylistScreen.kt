@@ -253,8 +253,9 @@ fun PlaylistScreen(navController: NavHostController) {
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Spacer(Modifier.height(2.dp))
+                            // 置顶状态由右侧图钉单独表达，副标题只保留视频数量，避免同一状态说两遍
                             Text(
-                                if (pl.pinnedAt > 0) "${pl.videos.size} 个视频 · 已置顶" else "${pl.videos.size} 个视频",
+                                "${pl.videos.size} 个视频",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -401,7 +402,7 @@ fun PlaylistScreen(navController: NavHostController) {
 /**
  * 置顶的「正在播放」列表项。
  *
- * 外观与普通自建列表完全一致（同一套玻璃底、同一图标、同样的「N 个视频 · 已置顶」副标题），
+ * 外观与普通自建列表完全一致（同一套玻璃底、同一图标、同样的「N 个视频」副标题与置顶图钉），
  * 它就是一个名为「正在播放」的置顶列表 —— 当前播放内容与进度放进它的详情页顶部展示。
  * 多选态下 [enabled] = false：它不是可勾选/可删除的实体列表，避免误触多一层返回。
  */
@@ -435,7 +436,7 @@ private fun NowPlayingEntry(
             Text("正在播放", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(2.dp))
             Text(
-                "$count 个视频 · 已置顶",
+                "$count 个视频",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -719,8 +719,8 @@ fun PlayerScreen(navController: NavHostController) {
         }
         AnimatedVisibility(
             visible = (state.preparing || state.buffering) && state.error == null && !seekingHud,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeIn),
+            exit = fadeOut(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeOut),
             modifier = Modifier.fillMaxSize(),
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -755,8 +755,8 @@ fun PlayerScreen(navController: NavHostController) {
 
         AnimatedVisibility(
             visible = centerPlayVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeIn),
+            exit = fadeOut(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeOut),
             modifier = Modifier.fillMaxSize(),
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -830,15 +830,18 @@ fun PlayerScreen(navController: NavHostController) {
         // 隐约浮在面板里，看起来像脏点。面板关掉后控制条自动回来。
         AnimatedVisibility(
             visible = controlsVisible && !locked && !pipActive && !modalOpen,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeIn),
+            exit = fadeOut(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeOut),
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             Row(
                 Modifier
                     .fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)))
-                    .statusBarsPadding()
+                    // 播放页是沉浸式全屏，系统栏在组合完成后才异步隐藏；若这里用
+                    // statusBarsPadding()，第一帧会按仍是状态栏高度的 insets 把顶栏压下来，
+                    // 隐藏动画结束再弹回去（从历史页起播最快，最容易看到）。顶栏固定贴顶，
+                    // 不跟随 insets 动画位移。
                     .padding(horizontal = 6.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -934,8 +937,8 @@ fun PlayerScreen(navController: NavHostController) {
         // ---------------------------------------------------------------- 底部控制条
         AnimatedVisibility(
             visible = controlsVisible && !locked && !pipActive && !modalOpen,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            enter = fadeIn(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeIn),
+            exit = fadeOut(animationSpec = com.yaoahos.mypureplayer.ui.PageMotion.PlayerControlFadeOut),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             // 时长三路兜底：内核已解析 → 列表项自带 → 抽帧时落盘的缓存。
@@ -1114,7 +1117,13 @@ fun PlayerScreen(navController: NavHostController) {
                                     modifier = Modifier.size(if (narrow) 28.dp else 30.dp),
                                 )
                             }
-                            val hasNext = state.queueIndex >= 0 && state.queueIndex < state.queueSize - 1
+                            // 随机模式按「本轮还剩多少集」判断，最后一集播完后按钮置灰；
+                            // 其余模式仍按队列顺序判断，末尾不提供空转的下一集按钮
+                            val hasNext = if (state.playMode == PlayModes.SHUFFLE) {
+                                state.shuffleLeft > 0
+                            } else {
+                                state.queueIndex >= 0 && state.queueIndex < state.queueSize - 1
+                            }
                             PlayerIconButton(
                                 onClick = { Playback.next() },
                                 enabled = hasNext,

@@ -23,13 +23,15 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -66,10 +68,12 @@ import com.yaoahos.mypureplayer.media.Thumbnails
 import com.yaoahos.mypureplayer.data.SmbClient
 import com.yaoahos.mypureplayer.data.SmbErrors
 import com.yaoahos.mypureplayer.data.SmbEntry
+import com.yaoahos.mypureplayer.data.SmbPath
 import com.yaoahos.mypureplayer.data.SmbServer
 import com.yaoahos.mypureplayer.data.SortKey
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.playback.Playback
+import com.yaoahos.mypureplayer.ui.FileLocation
 import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.DurationBadge
@@ -120,7 +124,13 @@ fun SmbBrowserScreen(
     initialPath: String,
     addMode: Boolean = false,
     targetPlaylist: String = "",
+    /** 「在文件夹中显示」带来的目标视频标识；命中该卡片则高亮并滚动到它。 */
+    focus: String = "",
 ) {
+    // 目录层级完全由 NavHost 返回栈承载：每进一层压一个 smb 目的地、返回逐级 pop。
+    // 无论是从网络首页正常浏览，还是「在文件夹中显示」跳进深层目录（进入时已把
+    // 从共享根到目标的每一级都压进栈），这里看到的都只是当前这一层，转场只有 NavHost
+    // 那一套（PageMotion），不再有 jump 分支 / 页内 AnimatedContent / 手改 zIndex。
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     // 待用户选择目标列表的视频；非空时弹出 PlaylistTargetSheet。
@@ -141,18 +151,19 @@ fun SmbBrowserScreen(
     // 「删除历史」按选中视频是否有观看记录决定是否置灰
     val history by Graph.history.history.collectAsStateWithLifecycle()
     var server by remember(serverId) { mutableStateOf(Graph.servers.byId(serverId)) }
+    // 本实例显示的目录就是路由参数里的那一层；每层一个独立目的地，预填缓存按它取，
+    // 返回时露出的是栈里已有的父目录实例，不会「先画下层再跳成正确内容」。
+    val path = initialPath.ifBlank { server?.rootPath ?: "smb:///" }
     // 进出文件夹是新路由实例：用内存缓存同步预填列表与加载态，
     // 第一帧即有内容，不会闪「加载中/刷新图标」（cachedList 是纯内存查找，组合期调用安全）
-    var entries by remember(server?.id, initialPath) {
+    var entries by remember(server?.id, path) {
         val srv = Graph.servers.byId(serverId)
-        val p = initialPath.ifBlank { srv?.rootPath ?: "smb:///" }
-        val cached = srv?.let { SmbClient.cachedList(it, p) }
+        val cached = srv?.let { SmbClient.cachedList(it, path) }
         mutableStateOf(cached?.let { SmbClient.videoOnly(it) } ?: emptyList())
     }
-    var loading by remember(server?.id, initialPath) {
+    var loading by remember(server?.id, path) {
         val srv = Graph.servers.byId(serverId)
-        val p = initialPath.ifBlank { srv?.rootPath ?: "smb:///" }
-        mutableStateOf(srv == null || SmbClient.cachedList(srv, p) == null)
+        mutableStateOf(srv == null || SmbClient.cachedList(srv, path) == null)
     }
     // 只有用户主动下拉刷新才让顶部弧线转圈；进文件夹/首开不闪
     var refreshing by remember { mutableStateOf(false) }
@@ -161,6 +172,9 @@ fun SmbBrowserScreen(
     var pullReload by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
+    // 列目录是一次阻塞式网络调用：连续下拉会让多次 list 同时打 NAS，
+    // 谁最后结束谁清 spinner，转圈就被拖到最慢那次。同一时刻只允许一次在飞。
+    var reloadRunning by remember { mutableStateOf(false) }
     var gridMode by rememberSaveable { mutableStateOf(settings.smbBrowserGrid) }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -192,33 +206,63 @@ fun SmbBrowserScreen(
     }
 
     val activeServer = server
-    val path = initialPath.ifBlank { activeServer?.rootPath ?: "smb:///" }
+
+    // 返回的唯一定义：顶栏返回按钮与系统返回键都走这里。
+    // 目录层级就是返回栈，一律 popBackStack —— 退到父目录、再退到网络首页，
+    // 动画与全站页面转场完全一致（PageMotion）。
+    fun stepBack() {
+        navController.popBackStack()
+    }
 
     LaunchedEffect(activeServer?.id, path, reloadKey) {
         val srv = activeServer ?: return@LaunchedEffect
+        // 同一目录同时只允许一次列目录在飞：阻塞式 smbj 调用不会因为协程取消而中断，
+        // 多次叠加会一起抢连接，spinner 要等最慢那次才停。
+        if (reloadRunning) return@LaunchedEffect
+        reloadRunning = true
         error = null
         // 只有下拉刷新（reloadKey 递增且来自下拉手势）才驱动顶部弧线；
         // 进文件夹/首开走缓存静默刷新，不再闪图标
         val isPull = pullReload
         pullReload = false
-        if (isPull) refreshing = true
-        // 先用缓存把列表画出来：进出文件夹、从播放页返回都是瞬开，
-        // 后台再刷新（下拉刷新会带 force 真正去打一次 NAS）。
-        val cached = SmbClient.cachedList(srv, path)
-        if (cached != null) {
-            entries = SmbClient.videoOnly(cached)
-            loading = false
-        } else {
-            loading = true
-        }
-        val listed = runCatching { SmbClient.list(srv, path, force = isPull) }
-        listed.onSuccess { entries = SmbClient.videoOnly(it) }
-            .onFailure {
-                // 有缓存时刷新失败不要把已有内容替换成错误页，用户至少还能继续浏览
-                if (cached == null) error = SmbErrors.describe(it)
+        try {
+            if (isPull) refreshing = true
+            // 先用缓存把列表画出来：进出文件夹、从播放页返回都是瞬开，
+            // 后台再刷新（下拉刷新会带 force 真正去打一次 NAS）。
+            val cached = SmbClient.cachedList(srv, path)
+            if (cached != null) {
+                entries = SmbClient.videoOnly(cached)
+                loading = false
+            } else {
+                loading = true
             }
-        loading = false
-        refreshing = false
+            // 超时分两档：有缓存时短超时快速失败、继续看旧列表；没缓存（首次进目录 /
+            // 冷启动）必须给足建连时间——SMB 握手本身就要 20s，再加认证与列目录，
+            // 一律 20s 会在握手没结束时就把页面判成「响应超时进不去」。
+            // 注意这里只取消协程，阻塞的 smbj 调用仍会跑完，所以上限按最坏冷连接给。
+            val listTimeout = if (cached != null) 20_000L else 70_000L
+            val listed = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(listTimeout) {
+                    SmbClient.list(srv, path, force = isPull)
+                }
+            }
+                // 取消不是失败：否则缓存为空时会把"取消"误报成错误页。
+                .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+            when {
+                listed.isFailure -> {
+                    if (cached == null) error = SmbErrors.describe(srv, listed.exceptionOrNull()!!)
+                }
+                listed.getOrNull() == null -> {
+                    if (cached == null) error = "网络位置响应超时，请下拉重试"
+                }
+                else -> entries = SmbClient.videoOnly(listed.getOrNull()!!)
+            }
+        } finally {
+            // 任何路径（包括外部取消）都要收旗，否则会一直转圈
+            loading = false
+            refreshing = false
+            reloadRunning = false
+        }
     }
 
     // 进入目录即恢复封面抽帧（播放网络视频时会临时暂停，把通道让给首帧）
@@ -282,9 +326,51 @@ fun SmbBrowserScreen(
     // 文件夹与视频始终混排展示，不再区分浏览方式
     val visibleVideos = filteredVideos
 
+    // 「在文件夹中显示」的定位描边只在刚跳进来时有意义：它标的是"你要找的就是这一条"。
+    // 播完这条视频再返回，描边还亮着会被误认成多选选中态（用户 2026-11-27 反馈）。
+    // 路由参数不可变，这里留一份可清空的状态；以 focus 作 key，换目标重新跳转时重新生效。
+    var activeFocus by rememberSaveable(focus) { mutableStateOf(focus) }
+
+    // 「在文件夹中显示」的目标定位：列表 state 必须在下面 activeServer 提前返回之前创建，
+    // 否则服务器缺失时重组会跳过 remember、回来后 state 归属错位。
+    val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
+    val focusIndex = remember(visibleVideos, activeFocus) {
+        if (activeFocus.isBlank()) -1
+        else visibleVideos.indexOfFirst { FileLocation.matches(it, activeFocus) }
+    }
+    LaunchedEffect(activeFocus, focusIndex, visibleVideos.size, filteredFolders.size, gridMode, addMode) {
+        if (focusIndex < 0) return@LaunchedEffect
+        // 等目标出现在列表里（首帧可能还没加载完）再定位；瞬时滚动，不引入新动画。
+        // 列表前面还有「文件夹」分区与若干文件夹行，得算上偏移；addMode 用的是另一种布局。
+        //
+        // 两个分区标题（「文件夹」「视频」）只在有文件夹时出现 —— 视频标题与文件夹分区
+        // 是同一个 if 里的，没有子文件夹时列表里没有任何前置项。少算这一档会多滚两格，
+        // 在宫格里正好把被定位的那一条滚出屏幕（看起来像没定位）。
+        val headerItems = if (filteredFolders.isEmpty()) 0 else 2 + filteredFolders.size
+        // addMode 是 LazyColumn（listState）；普通浏览的宫格与列表都是基于 gridState 的
+        // LazyVerticalGrid（列表模式只是把格子缩到一行高），这里必须跟布局走。
+        if (addMode) {
+            listState.scrollToItem((headerItems + focusIndex).coerceAtLeast(0))
+        } else {
+            gridState.scrollToItem((headerItems + focusIndex).coerceAtLeast(0))
+        }
+    }
+
     if (activeServer == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         return
+    }
+
+    /**
+     * 播放视频，并撤掉「在文件夹中显示」的定位描边。
+     *
+     * 只有播的正是被定位的那一条才清：播别的视频时，描边指向的目标还在，仍然有用。
+     * 宫格与列表两个分支共用，避免两处各写一遍又把语义写歪。
+     */
+    fun playFromFocus(item: VideoItem, play: () -> Unit) {
+        if (FileLocation.matches(item, activeFocus)) activeFocus = ""
+        play()
     }
 
     val selectedVideos = remember(visibleVideos, selection.ids) {
@@ -303,6 +389,9 @@ fun SmbBrowserScreen(
         selectedVideos.any { (it.id to it.source) in historyKeys }
     }
 
+    // 系统返回键交给 NavHost 默认弹栈处理：目录层级就是返回栈，逐级 pop
+    // 天然沿目录树退回，不需要页面自己接管。选择态与搜索框的返回在下面优先处理。
+
     // 添加模式下选择态是常驻的：返回键应当直接退出页面，而不是"退选择"
     BackHandler(enabled = selection.active && !addMode) { selection.exit() }
 
@@ -317,6 +406,22 @@ fun SmbBrowserScreen(
     } else {
         Formats.baseName(path).ifBlank { activeServer.name }
     }
+    // 下钻进子文件夹 = 压一个新的 smb 目的地。防连点挡两件事：同一目录自己压自己；
+    // 转场期间旧层还活着，它上面的卡片再点一次会叠第二次转场。
+    var navigationPending by remember { mutableStateOf(false) }
+    LaunchedEffect(navigationPending) {
+        if (navigationPending) {
+            kotlinx.coroutines.delay(600) // 大于转场时长，短于用户再次点击的间隔
+            navigationPending = false
+        }
+    }
+    fun openFolder(target: String) {
+        if (target == path || navigationPending) return
+        navigationPending = true
+        // 不能加 launchSingleTop：参数化路由只看 destination id，会把上一层目录顶掉，
+        // 从子文件夹返回就跳过父目录直达服务器列表。防连点交给上面的 navigationPending。
+        navController.navigate(Routes.smb(serverId, target, addMode, targetPlaylist))
+    }
     PageTopBarHost(
         title = title,
         subtitle = if (addMode) {
@@ -324,7 +429,7 @@ fun SmbBrowserScreen(
             // 带"可选"二字，避免用户以为全部数量都要加入播放列表。
             "${visibleVideos.size} 个视频可选"
         } else path,
-        onBack = { navController.popBackStack() },
+        onBack = { stepBack() },
         searchOpen = searchOpen,
         query = query,
         onQueryChange = { query = it },
@@ -375,9 +480,7 @@ fun SmbBrowserScreen(
                                 // 这里先把条目取出来，目标列表由随后弹出的选择器决定。
                                 scope.launch {
                                     val fromFolders = selectedFolders.flatMap { folder ->
-                                        runCatching { SmbClient.list(activeServer, folder.url) }
-                                            .getOrNull()?.let { SmbClient.videoOnly(it) }
-                                            ?.let { SmbClient.toVideoItems(activeServer, it, folder.url) }.orEmpty()
+                                        folderVideosOrNull(activeServer, folder.url).orEmpty()
                                     }
                                     val seen = HashSet<String>()
                                     val items = (selectedVideos + fromFolders).filter { seen.add(it.id) }
@@ -400,9 +503,7 @@ fun SmbBrowserScreen(
                         ) {
                             when {
                                 soloVideo != null -> playFromFolder(navController, activeServer, entries, path, soloVideo)
-                                soloFolder != null -> navController.navigate(
-                                    Routes.smb(activeServer.id, soloFolder.url, addMode, targetPlaylist)
-                                )
+                                soloFolder != null -> openFolder(soloFolder.url)
                             }
                             selection.exit()
                         },
@@ -410,9 +511,7 @@ fun SmbBrowserScreen(
                             if (soloVideo != null) infoItem = soloVideo
                             if (soloFolder != null) {
                                 scope.launch {
-                                    val list = runCatching { SmbClient.list(activeServer, soloFolder.url) }
-                                        .getOrNull()?.let { SmbClient.videoOnly(it) }
-                                        ?.let { SmbClient.toVideoItems(activeServer, it, soloFolder.url) }.orEmpty()
+                                    val list = folderVideosOrNull(activeServer, soloFolder.url).orEmpty()
                                     infoFolder = soloFolder to list
                                 }
                             }
@@ -422,9 +521,7 @@ fun SmbBrowserScreen(
                             scope.launch {
                                 // 多选：选中的视频 + 每个选中文件夹的直属视频（不递归子目录），按 id 去重
                                 val fromFolders = selectedFolders.flatMap { folder ->
-                                    runCatching { SmbClient.list(activeServer, folder.url) }
-                                        .getOrNull()?.let { SmbClient.videoOnly(it) }
-                                        ?.let { SmbClient.toVideoItems(activeServer, it, folder.url) }.orEmpty()
+                                    folderVideosOrNull(activeServer, folder.url).orEmpty()
                                 }
                                 val seen = HashSet<String>()
                                 val list = (selectedVideos + fromFolders).filter { seen.add(it.id) }
@@ -461,7 +558,7 @@ fun SmbBrowserScreen(
                             null
                         } else {
                             SelectionAction(
-                                Icons.Rounded.History,
+                                Icons.Rounded.DeleteSweep,
                                 "删除历史",
                                 enabled = canAct && hasHistory,
                             ) {
@@ -479,7 +576,8 @@ fun SmbBrowserScreen(
     ) { padding ->
         PullRefreshBox(
             isRefreshing = refreshing,
-            onRefresh = { pullReload = true; reloadKey++ },
+            // 上一次还没回来就忽略这次下拉，别把多次网络请求叠在一起
+            onRefresh = { if (!reloadRunning) { pullReload = true; reloadKey++ } },
             // 刷新失败时页面已经写明「无法打开这个位置」，再弹一句「已刷新」是自相矛盾；
             // 成功才提示，失败让错误态自己说话。
             doneText = { if (error != null) null else "已刷新" },
@@ -528,6 +626,7 @@ fun SmbBrowserScreen(
                     // 文件夹左侧=进入目录、右侧复选框=勾选整个目录的直属视频；
                     // 视频整行=勾选/取消选择，右侧复选框同步显示状态。
                     addMode -> LazyColumn(
+                        state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(
                             start = PageMetrics.HPad,
@@ -546,9 +645,7 @@ fun SmbBrowserScreen(
                                 checked = selection.contains("d:${folder.url}"),
                                 onEnterFolder = {
                                     flashClick {
-                                        navController.navigate(
-                                            Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist)
-                                        )
+                                        openFolder(folder.url)
                                     }
                                 },
                                 onToggle = { selection.toggle("d:${folder.url}") },
@@ -568,6 +665,7 @@ fun SmbBrowserScreen(
 
                     gridMode -> LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = adaptiveMediaGridMinSize()),
+                        state = gridState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = PageMetrics.HPad, end = PageMetrics.HPad, top = 8.dp, bottom = 28.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -588,12 +686,12 @@ fun SmbBrowserScreen(
                                     } else if (selection.active) {
                                         selection.toggle("d:${folder.url}")
                                     } else {
-                                        navController.navigate(Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist))
+                                        openFolder(folder.url)
                                     }
                                 },
                                 onLongClick = {
                                     if (addMode) {
-                                        navController.navigate(Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist))
+                                        openFolder(folder.url)
                                     } else {
                                         selection.enter("d:${folder.url}")
                                     }
@@ -615,18 +713,22 @@ fun SmbBrowserScreen(
                                         // 添加模式下单击即勾选，明确入选后再点底部「加入列表」
                                         selection.enter("v:${item.id}")
                                     } else {
-                                        playFromFolder(navController, activeServer, entries, path, item)
+                                        playFromFocus(item) {
+                                            playFromFolder(navController, activeServer, entries, path, item)
+                                        }
                                     }
                                 },
                                 onLongClick = { selection.enter("v:${item.id}") },
                                 selected = selection.contains("v:${item.id}"),
                                 selecting = selection.active,
+                                focused = FileLocation.matches(item, activeFocus),
                             )
                         }
                     }
 
                     else -> LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = listRowMinSize()),
+                        state = gridState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = PageMetrics.HPad, end = PageMetrics.HPad, top = 4.dp, bottom = 28.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -646,12 +748,12 @@ fun SmbBrowserScreen(
                                         } else if (selection.active) {
                                             selection.toggle("d:${folder.url}")
                                         } else {
-                                            navController.navigate(Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist))
+                                            openFolder(folder.url)
                                         }
                                     },
                                     onLongClick = {
                                         if (addMode) {
-                                            navController.navigate(Routes.smb(activeServer.id, folder.url, addMode, targetPlaylist))
+                                            openFolder(folder.url)
                                         } else {
                                             selection.enter("d:${folder.url}")
                                         }
@@ -674,12 +776,15 @@ fun SmbBrowserScreen(
                                         } else if (addMode) {
                                             selection.enter("v:${item.id}")
                                         } else {
-                                            playFromFolder(navController, activeServer, entries, path, item)
+                                            playFromFocus(item) {
+                                                playFromFolder(navController, activeServer, entries, path, item)
+                                            }
                                         }
                                     },
                                     onLongClick = { selection.enter("v:${item.id}") },
                                     selected = selection.contains("v:${item.id}"),
                                     selecting = selection.active,
+                                    focused = FileLocation.matches(item, activeFocus),
                                 )
                             }
                         }
@@ -692,8 +797,13 @@ fun SmbBrowserScreen(
     if (sortSheetOpen) {
         SortLayoutSheet(
             onDismiss = {
-                // onPreview 已经实时应用了用户的选择，这里不能再拿打开面板时的旧快照
-                // 覆盖回去——否则点遮罩关闭会把刚选的排序/布局悄悄撤销，看起来像「排序没生效」。
+                // 取消（含点遮罩/返回键）要把 onPreview 的实时改动回滚到 opening 快照；
+                // 确定时 onApply 已先清空 sortDraft，这里不会覆盖已确定的选择。
+                sortDraft?.let { draft ->
+                    gridMode = draft.grid
+                    sortName = draft.key
+                    ascending = draft.ascending
+                }
                 sortDraft = null
                 sortSheetOpen = false
             },
@@ -737,6 +847,7 @@ fun SmbBrowserScreen(
             destructive = true,
             onConfirm = {
                 pendingHistoryDelete = null
+                com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(targets.map { it.id })
                 scope.launch {
                     val n = Graph.history.removeAll(targets.map { it.id })
                     Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
@@ -841,6 +952,20 @@ private fun PageTopBarHost(
         bottomBar = bottomBar,
     ) { padding -> content(padding) }
 }
+
+/**
+ * 取某个子文件夹的直属视频（不递归子目录）。
+ *
+ * 用 [runCatching] 包 SMB 调用时必须把协程取消原样抛出：用户点了「加入列表 / 详情」
+ * 立刻返回上页，协程被取消，若把它当成失败，回调里会接着提示「这里没有视频」——
+ * 明明只是没等到结果。失败返回 null，由调用方决定提示什么。
+ */
+private suspend fun folderVideosOrNull(server: SmbServer, folder: String): List<VideoItem>? =
+    runCatching { SmbClient.list(server, folder) }
+        .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+        .getOrNull()
+        ?.let { SmbClient.videoOnly(it) }
+        ?.let { SmbClient.toVideoItems(server, it, folder) }
 
 /**
  * 播放网络视频：把同目录所有视频排进播放列表，并从当前这一个开始。

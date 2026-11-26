@@ -9,6 +9,8 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +40,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -526,7 +529,7 @@ fun VaultUnlockDialog(
     val host = com.yaoahos.mypureplayer.ui.components.LocalAppOverlayHost.current
     if (host != null) {
         com.yaoahos.mypureplayer.ui.components.AppOverlaySlot {
-            UnlockBody(config, title, onDismiss, onUnlocked)
+            UnlockBody(config, title, onDismiss, onUnlocked, inOverlay = true)
         }
         return
     }
@@ -538,7 +541,7 @@ fun VaultUnlockDialog(
         ),
     ) {
         com.yaoahos.mypureplayer.ui.components.DisableDialogWindowDim()
-        UnlockBody(config, title, onDismiss, onUnlocked)
+        UnlockBody(config, title, onDismiss, onUnlocked, inOverlay = false)
     }
 }
 
@@ -548,7 +551,24 @@ private fun UnlockBody(
     title: String,
     onDismiss: () -> Unit,
     onUnlocked: () -> Unit,
+    inOverlay: Boolean,
 ) {
+    // 与全站居中弹窗同一套出现动画：140ms 淡入 + 0.94→1 微缩放。
+    // 只有浮层需要自绘；Dialog 窗口自带系统动画，再叠一层会动两次。
+    val enter = remember {
+        androidx.compose.animation.core.Animatable(if (inOverlay) 0f else 1f)
+    }
+    LaunchedEffect(inOverlay) {
+        if (inOverlay) {
+            enter.animateTo(
+                1f,
+                androidx.compose.animation.core.tween(
+                    140,
+                    easing = androidx.compose.animation.core.FastOutSlowInEasing,
+                ),
+            )
+        }
+    }
     androidx.activity.compose.BackHandler { onDismiss() }
     Box(Modifier.fillMaxSize()) {
         // 遮罩：早先这个弹窗没有遮罩，全靠对话框窗口的 dim。走浮层后必须自己画，
@@ -556,7 +576,11 @@ private fun UnlockBody(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f))
+                .drawBehind {
+                    drawRect(
+                        androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f * enter.value)
+                    )
+                }
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -568,6 +592,11 @@ private fun UnlockBody(
                 .align(Alignment.Center)
                 .fillMaxWidth(0.92f)
                 .widthIn(max = com.yaoahos.mypureplayer.ui.components.PageMetrics.DialogMaxWidth)
+                .graphicsLayer {
+                    alpha = enter.value
+                    scaleX = 0.94f + 0.06f * enter.value
+                    scaleY = 0.94f + 0.06f * enter.value
+                }
                 // 与全站弹窗同一块面板：早先用 panelStrong（近实色白片），在浅色下比
                 // 其它弹窗明显更白更实，看起来像"另一套弹窗"。改成同一张玻璃面板。
                 .appDialogSurface(

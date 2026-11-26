@@ -10,6 +10,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
+import com.yaoahos.mypureplayer.media.Thumbnails
 import java.io.File
 
 /**
@@ -553,6 +554,8 @@ class VaultRepo(
                 _unlocked.value = false
                 // 加密目录里只剩空壳时一并清掉，避免占用空间、也让下次是干净状态
                 runCatching { if (root.listFiles()?.isEmpty() != false) root.deleteRecursively() }
+                // 逐条移出时已经把图搬回本地；这里兜底清一次，防止有孤儿条目留下明文封面
+                runCatching { Thumbnails.dropAllVaultThumbs(context) }
                 DisableResult(restored, 0, "已移出 $restored 个视频，保险箱已关闭")
             }
         }
@@ -635,12 +638,18 @@ class VaultRepo(
                     lastError = "加密失败：${item.fileName}（可能空间不足）"
                     return@forEachIndexed
                 }
+                // 缩略图跟着条目一起进保险箱：此刻明文还在，缓存里也多半已经有图。
+                // 不做解密抽帧（既慢，也违背「内容只在播放时解密」），也不共用普通
+                // 缓存目录（那里的图按 LRU 淘汰，淘汰后密文再也补不回来）。
+                runCatching { Thumbnails.carryIntoVault(context, item, stored) }
                 // 加密成功后才删除明文
                 val deleted = source.delete()
                 if (!deleted) {
                     android.util.Log.e("VaultRepo", "delete plaintext failed: $path")
                     // 明文删不掉就放弃这条，避免出现「保险箱里一份、外面还看得见」
                     runCatching { target.delete() }
+                    // 密文没了，带过来的封面也要一起回滚，否则留在 vault_thumbs 里成孤儿
+                    runCatching { Thumbnails.dropVaultThumb(context, stored) }
                     lastError = "无法删除原文件：${item.fileName}（请检查「所有文件访问权限」）"
                     return@forEachIndexed
                 }
@@ -781,6 +790,9 @@ class VaultRepo(
             return null
         }
         runCatching { source.delete() }
+        // 图跟着回来：移入时是从本地缓存搬过去的，移出就搬回本地路径的 key，
+        // 否则用户刚恢复出来的视频在列表里又是一枚默认图标。
+        runCatching { Thumbnails.carryOutOfVault(context, entry.storedName, target.absolutePath) }
 
         val next = _entries.value.filterNot { it.id == entry.id && it.storedName == entry.storedName }
         writeEntries(next)
@@ -824,7 +836,11 @@ class VaultRepo(
             // 「id + 密文名」双条件：历史数据里可能有重复 id（1.0.4 及以前按毫秒发号），
             // 只按 id 过滤会把另一条不相干的记录一起从索引里抹掉。
             val keys = entries.mapTo(HashSet()) { it.id to it.storedName }
-            entries.forEach { runCatching { fileOf(it).delete() } }
+            entries.forEach {
+                runCatching { fileOf(it).delete() }
+                // 图是明文，条目没了必须一起清；否则「彻底删除」之后本地还留着一张画面
+                runCatching { Thumbnails.dropVaultThumb(context, it.storedName) }
+            }
             val next = _entries.value.filterNot { (it.id to it.storedName) in keys }
             writeEntries(next)
         }

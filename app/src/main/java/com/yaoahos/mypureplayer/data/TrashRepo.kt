@@ -3,6 +3,7 @@ package com.yaoahos.mypureplayer.data
 import android.content.Context
 import android.os.Environment
 import android.util.Base64
+import com.yaoahos.mypureplayer.media.Thumbnails
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -634,6 +635,9 @@ class TrashRepo(
                 IllegalStateException("没有写入权限，请开启「所有文件访问权限」"),
             )
         }
+        // 文件换了路径，把缩略图缓存一起搬到回收站路径的 key 下。
+        // 否则回收站卡片读不到旧图、只能重新抽帧，用户看到的就是「删进回收站封面变了」。
+        Thumbnails.moveCacheKey(context, originalPath, target.absolutePath)
 
         val entry = TrashEntry(
             id = nextId(),
@@ -751,6 +755,8 @@ class TrashRepo(
             return Result.failure(IllegalStateException("恢复失败，请检查存储权限"))
         }
         runCatching { metaFile.delete() }
+        // 与删除时对称：把缩略图缓存从回收站路径搬回恢复后的路径，封面保持不变。
+        Thumbnails.moveCacheKey(context, source.absolutePath, target.absolutePath)
 
         removeEntry(entry)
         FileOps.scan(context, target.absolutePath)

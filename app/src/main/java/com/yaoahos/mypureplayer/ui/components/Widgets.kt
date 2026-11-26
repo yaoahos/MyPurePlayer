@@ -31,7 +31,6 @@ import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -46,16 +45,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.yaoahos.mypureplayer.R
@@ -98,31 +101,35 @@ fun VideoThumb(
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 14.dp,
     showIcon: Boolean = true,
+    /** 宫格卡片用：缩略图铺到卡片边缘，只圆上面两角（与卡片圆角一致） */
+    roundedTop: Boolean = false,
 ) {
     val context = LocalContext.current
     // 订阅服务器列表而非 remember 缓存：首帧组合时 servers 可能还没加载完，
-    // 缓存一个 null 会导致该缩略图永远走不到 HTTP 抽帧分支。
-    val servers by Graph.servers.servers.collectAsStateWithLifecycle()
-    // 匹配规则与播放一致：共享已经不在当前配置里的旧条目不去连，直接没有封面
-    val server = remember(item.id, item.uri, servers) {
-        if (item.source == MediaSource.SMB) {
-            Graph.servers.forSmbItem(item.serverId, item.uri)
-        } else null
-    }
-    // 播放登记「已播放」后 playedVersion 变化，触发重新取缩略图（低频事件，可作 key）
-    val playedVersion by Thumbnails.playedVersion.collectAsStateWithLifecycle()
-    // 「重置缩略图」后 epoch 变化：没有这个 key，卡片会一直显示手里那张旧图
+    // 缓存一个 null 会导致该缩略图永远走不到抽帧分支。
+    // 只有 SMB 条目需要它 —— 本地视频（列表里绝大多数）不该为此挂一套生命周期监听。
+    val server = if (item.source == MediaSource.SMB) {
+        val servers by Graph.servers.servers.collectAsStateWithLifecycle()
+        // 匹配规则与播放一致：共享被移除、默认目录改过、或位置已被限制到别的子目录时，
+        // 旧条目不去连，直接没有封面
+        remember(item.id, item.uri, item.folderKey, servers) {
+            Graph.servers.forSmbItemWithin(item.serverId, item.uri, item.folderKey)
+        }
+    } else null
+    // 「重置缩略图」/ 清除缓存 / 播放登记后 epoch 变化：没有这个 key，卡片会一直显示手里那张旧图
     val thumbEpoch by Thumbnails.epoch.collectAsStateWithLifecycle()
-    val bitmap by produceState<BitmapHolder?>(
-        initialValue = null,
-        item.id,
-        item.dateModified,
-        item.sizeBytes,
-        server?.id,
-        playedVersion,
-        thumbEpoch,
-    ) {
-        value = Thumbnails.load(context, item, server)?.let { BitmapHolder(it) }
+
+    // 首帧初值：同步查一次内存缓存。
+    //
+    // 原来 produceState 一律从 null 起步，即使图已经在内存里，屏幕上第一帧画的仍是
+    // 占位图标，下一帧才闪成缩略图 —— 每次进文件夹、每次从播放页返回，整屏都要先闪
+    // 一下图标，观感就是「每次都在重新加载缩略图」。这里把内存命中直接当作初值，
+    // 卡片一出现就是图；未命中再由 LaunchedEffect 走磁盘与生成。
+    var bitmap by remember(item.id, item.dateModified, item.sizeBytes, thumbEpoch) {
+        mutableStateOf(Thumbnails.memoryCached(item)?.let { BitmapHolder(it) })
+    }
+    LaunchedEffect(item.id, item.dateModified, item.sizeBytes, server?.id, thumbEpoch) {
+        if (bitmap == null) bitmap = Thumbnails.load(context, item, server)?.let { BitmapHolder(it) }
         // 全局 thumbVersion（每次后台抽帧落盘 +1）不能放进 key：那会让「一张图完成」
         // 重启当前屏幕上所有卡片的 produceState，几十张卡片集体重取。改成只有
         // 还没拿到图的卡片才等待版本号变化后自行重试。
@@ -132,48 +139,120 @@ fun VideoThumb(
         // 而设了上限更糟 —— 一屏二十几张时，排在后半段的卡片前几轮都还没轮到，
         // 次数用完就永久停在占位图标上（实测 24 张全部抽帧成功，界面却只更新了 10 张）。
         var tries = 0
-        while (value == null) {
+        while (bitmap == null) {
             val seen = Thumbnails.thumbVersion.value
             Thumbnails.thumbVersion.first { it != seen }
             tries++
             // 越靠后等得越久，把重试均匀摊开，别和别人的新请求撞在一起
             kotlinx.coroutines.delay(80L * tries.coerceAtMost(8) + (0..400).random())
-            if (value != null) break
+            if (bitmap != null) break
             val bmp = Thumbnails.load(context, item, server)
-            if (bmp != null) value = BitmapHolder(bmp)
+            if (bmp != null) bitmap = BitmapHolder(bmp)
         }
     }
 
-    BoxWithConstraints(
-        modifier = modifier
-            .clip(RoundedCornerShape(cornerRadius)),
+    // 这里原来是 BoxWithConstraints —— 它本质是 SubcomposeLayout，每张卡都要跑一次
+    // 子组合。一屏二十张卡、每张两次（卡片自己一次、缩略图一次）时，滚动每帧都要
+    // 重跑几十次子组合，是列表滚动最主要的 CPU 开销（实测 GPU 只占 4ms，主线程 25ms）。
+    // 图标尺寸用 layout 修改器按宽度算，纯测量、不子组合。
+    // 圆角不再通过 Modifier.clip 实现：clip 会给这张图单独建一个离屏图层，
+    // 一屏二十张缩略图就是二十个图层，进入目录时实测 200ms 一帧。
+    // 改成「位图当 Shader 铺满圆角路径」——纯 GPU 填充，不建图层。
+    // 宫格卡片传 roundedTop：缩略图只圆上面两角，正好贴合卡片的圆角。
+    Box(
+        modifier = modifier,
         contentAlignment = Alignment.Center,
     ) {
         val holder = bitmap
         if (holder != null) {
-            // 有缩略图就铺满展示，不叠加任何背景区域
-            Image(
-                bitmap = holder.bitmap.asImageBitmap(),
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .roundedBitmap(
+                        bitmap = holder.bitmap,
+                        radiusDp = if (roundedTop) PageMetrics.CardRadius else cornerRadius,
+                        // 宫格卡片的图只贴住卡片上沿：下面接着标题区，下两角必须保持直角。
+                        // 漏了这一个参数会让图片下沿被切出两个缺口，像悬在卡片里的一条圆角条。
+                        topOnly = roundedTop,
+                    ),
             )
         } else if (showIcon) {
             // 没有缩略图时直接展示影片图标，不再加灰白色背景块去"扩充"成一张卡片的形状。
-            // 图标按容器尺寸缩放，本身留白由图标的矢量 padding 提供，视觉上就是一枚裸图标。
-            val iconSize = (maxWidth * 0.68f).coerceIn(28.dp, 80.dp)
+            // 图标按容器宽度缩放，本身留白由图标的矢量 padding 提供，视觉上就是一枚裸图标。
             Icon(
                 imageVector = Icons.Rounded.Movie,
                 contentDescription = item.title,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                modifier = Modifier.size(iconSize),
+                modifier = Modifier.iconSized(0.68f, min = 28.dp, max = 80.dp),
             )
         }
     }
 }
 
+/**
+ * 按父容器宽度的 [fraction] 取一个正方形尺寸，并限制在 [min]~[max]。
+ *
+ * 与 `BoxWithConstraints { (maxWidth * fraction).coerceIn(min, max) }` 等价，
+ * 但走 [layout] 而不是 SubcomposeLayout：后者要为每个节点起一次子组合，
+ * 卡片列表一屏三十多个时是进入目录最大的一笔主线程开销。
+ */
+private fun Modifier.iconSized(fraction: Float, min: Dp, max: Dp): Modifier = layout { measurable, constraints ->
+    val base = if (constraints.maxWidth == Constraints.Infinity) constraints.maxHeight else constraints.maxWidth
+    val side = (base * fraction).coerceIn(min.toPx(), max.toPx()).toInt().coerceAtLeast(1)
+    val placeable = measurable.measure(Constraints.fixed(side, side))
+    layout(side, side) { placeable.place(0, 0) }
+}
+
 /** 用引用包一层，避免 Bitmap 参与 Compose 相等性比较带来的额外开销 */
 class BitmapHolder(val bitmap: android.graphics.Bitmap)
+
+/**
+ * 把位图当 Shader 铺满一个圆角矩形（上两角圆、下两角直角时传 [topOnly]）。
+ *
+ * 不用 `Modifier.clip`：后者会为每个节点分配一个离屏图层，这台设备上约 7ms 一个，
+ * 一屏二十张缩略图就是 200ms 一帧。Shader 填充是纯 GPU 操作，且 shader 由
+ * [androidx.compose.ui.draw.drawWithCache] 按尺寸缓存，稳定滚动时零额外开销。
+ */
+internal fun Modifier.roundedBitmap(
+    bitmap: android.graphics.Bitmap,
+    radiusDp: Dp,
+    topOnly: Boolean = false,
+): Modifier = roundedBrush(BitmapFillBrush(bitmap), radiusDp, topOnly)
+
+/**
+ * 把任意 [Brush]（位图 / 渐变）铺满一个圆角矩形，同样不建离屏图层。
+ *
+ * 保险箱里「没有随条目带进来缩略图」的占位牌也要一层渐变底，原来写的是
+ * `clip(...) + background(...)`，和缩略图那条路一样会为每个格子建一个层，
+ * 所以这里把形状填充抽出来共用。
+ */
+internal fun Modifier.roundedBrush(
+    brush: Brush,
+    radiusDp: Dp,
+    topOnly: Boolean = false,
+): Modifier = drawWithCache {
+    val r = radiusDp.toPx()
+    if (r < 0.5f) {
+        onDrawBehind { drawRect(brush) }
+    } else {
+        val cr = androidx.compose.ui.geometry.CornerRadius(r)
+        val path = androidx.compose.ui.graphics.Path().apply {
+            addRoundRect(
+                androidx.compose.ui.geometry.RoundRect(
+                    left = 0f,
+                    top = 0f,
+                    right = size.width,
+                    bottom = size.height,
+                    topLeftCornerRadius = cr,
+                    topRightCornerRadius = cr,
+                    bottomRightCornerRadius = if (topOnly) androidx.compose.ui.geometry.CornerRadius.Zero else cr,
+                    bottomLeftCornerRadius = if (topOnly) androidx.compose.ui.geometry.CornerRadius.Zero else cr,
+                ),
+            )
+        }
+        onDrawBehind { drawPath(path, brush) }
+    }
+}
 
 /**
  * 全站统一的尺寸刻度。
@@ -292,8 +371,16 @@ fun Modifier.selectionCardOutline(
     selected: Boolean,
     selecting: Boolean,
     pressed: Boolean = false,
+    /**
+     * 「在文件夹中显示」定位到的那一张：复用选中态的描边 + 薄纱，但不显示勾选圈、
+     * 也不进入多选态，单击仍是播放。用它把目标视频从一堆同类卡片里标出来。
+     */
+    focused: Boolean = false,
 ): Modifier {
-    if (!selected && !selecting) return mediaCardOutline(pressed = pressed)
+    // focused 只借选中态的外观；一旦进入多选，就完全交回 selected/selecting 管，
+    // 避免出现一张「看起来选中却没有勾选圈」的卡让人误判。
+    val marked = selected || (focused && !selecting)
+    if (!marked && !selecting) return mediaCardOutline(pressed = pressed)
     val shape = RoundedCornerShape(PageMetrics.CardRadius)
     // 用用户当前主题色（与玻璃卡薄纱同源），而不是系统 primary，避免换主题后描边与底色串色。
     val accent = com.yaoahos.mypureplayer.ui.components.appGlass().accent
@@ -301,15 +388,15 @@ fun Modifier.selectionCardOutline(
     // （主题色 12%），与卡片自己的淡蓝底只差 2~3/255，按下去几乎没有反馈。
     val base = appGlassSurface(
         shape = shape,
-        tinted = selected,
-        elevation = if (selected) 1.dp else 3.dp,
+        tinted = marked,
+        elevation = if (marked) 1.dp else 3.dp,
     ).glassPressOverlay(pressed, shape, foreground = true)
     val outlined = base.border(
-        width = if (selected) 2.dp else 1.dp,
-        color = if (selected) accent else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+        width = if (marked) 2.dp else 1.dp,
+        color = if (marked) accent else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
         shape = shape,
     )
-    if (!selected) return outlined
+    if (!marked) return outlined
     return outlined.drawBehind { drawRect(accent.copy(alpha = 0.10f)) }
 }
 
@@ -376,8 +463,9 @@ fun SectionLabel(
         Box(
             Modifier
                 .size(width = 3.dp, height = if (compact) 13.dp else 16.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(MaterialTheme.colorScheme.primary),
+                // 圆角交给 background 的 outline 画，不再 clip：这是一条 3×16dp 的竖线，
+                // 为它单独建一个离屏图层不划算，页面上一出现就是好几条。
+                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp)),
         )
         Text(
             text,
@@ -484,6 +572,8 @@ fun VideoGridCard(
     progress: Float? = null,
     selected: Boolean = false,
     selecting: Boolean = false,
+    /** 「在文件夹中显示」定位到的目标：只加描边，不进多选、单击仍播放。 */
+    focused: Boolean = false,
     /** 回收站等页面需要显示原位置等信息时传入；不传则沿用全站统一的「时长 · 大小」。 */
     metaOverride: String? = null,
     metaMaxLines: Int = 1,
@@ -498,7 +588,7 @@ fun VideoGridCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .selectionCardOutline(pressed = pressed, selected = selected, selecting = selecting)
+                .selectionCardOutline(pressed = pressed, selected = selected, selecting = selecting, focused = focused)
                 .combinedClickable(
                     interactionSource = interaction,
                     indication = null,
@@ -517,7 +607,7 @@ fun VideoGridCard(
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f),
             ) {
-                VideoThumb(item, Modifier.fillMaxSize(), cornerRadius = 0.dp)
+                VideoThumb(item, Modifier.fillMaxSize(), cornerRadius = 0.dp, roundedTop = true)
                 SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
             }
             Column(
@@ -552,9 +642,12 @@ fun VideoGridCard(
                 val ratio = if (progress != null) progress else watchProgress(item)
                 if (ratio > 0f) {
                     Spacer(Modifier.height(3.dp))
-                    LinearProgressIndicator(
+                    WatchProgressBar(
                         progress = { ratio.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth(0.86f).height(3.dp).clip(RoundedCornerShape(2.dp)),
+                        modifier = Modifier.fillMaxWidth(0.86f).height(3.dp),
+                        // 与播放列表详情同一条轨道，别在玻璃卡上换成更显眼的 primaryContainer
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
                     )
                 }
             }
@@ -582,6 +675,8 @@ fun VideoListRow(
     onLongClick: (() -> Unit)? = null,
     selected: Boolean = false,
     selecting: Boolean = false,
+    /** 「在文件夹中显示」定位到的目标：只加描边，不进多选、单击仍播放。 */
+    focused: Boolean = false,
     metaOverride: String? = null,
     metaMaxLines: Int = 1,
 ) {
@@ -591,7 +686,7 @@ fun VideoListRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .selectionCardOutline(pressed = pressed, selected = selected, selecting = selecting)
+            .selectionCardOutline(pressed = pressed, selected = selected, selecting = selecting, focused = focused)
             .combinedClickable(
                 interactionSource = interaction,
                 indication = null,
@@ -630,9 +725,11 @@ fun VideoListRow(
             val ratio = watchProgress(item)
             if (ratio > 0f) {
                 Spacer(Modifier.height(4.dp))
-                LinearProgressIndicator(
+                WatchProgressBar(
                     progress = { ratio.coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
                 )
             }
         }
@@ -646,6 +743,41 @@ fun VideoListRow(
 fun mediaDuration(item: VideoItem): Long {
     val known = Thumbnails.displayDuration(item)
     return if (known > 0L) known else Graph.history.historyDuration(item.id, item.source)
+}
+
+/**
+ * 全站统一的细进度条。
+ *
+ * 不用 Material3 的 LinearProgressIndicator：这个版本会在轨道末端画一个 stopIndicator
+ * 圆点（默认主题色），看着像多出来的按钮；而不同页面传参不一致又会出现主题色/灰色混用。
+ * 这里只画一层轨道 + 一层进度，两端都是圆角、没有多余端点。
+ */
+@Composable
+fun WatchProgressBar(
+    progress: () -> Float,
+    modifier: Modifier = Modifier,
+    color: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.primary,
+    trackColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
+) {
+    // 用 Canvas 直接画两条圆角矩形，不再「clip + 两个 Box + background」。
+    //
+    // clip 会为这一条 3dp 高的进度条单独建一个离屏图层：宫格里一屏最多二十条
+    // 「看过一半」的进度条，就是二十个白建的层。进度直接读 lambda，只在绘制阶段
+    // 取值，进度变化只重绘不重组。
+    androidx.compose.foundation.Canvas(
+        modifier.height(3.dp),
+    ) {
+        val radius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f)
+        drawRoundRect(color = trackColor, cornerRadius = radius)
+        val done = size.width * progress().coerceIn(0f, 1f)
+        if (done > 0f) {
+            drawRoundRect(
+                color = color,
+                size = androidx.compose.ui.geometry.Size(done, size.height),
+                cornerRadius = radius,
+            )
+        }
+    }
 }
 
 /**
@@ -693,6 +825,9 @@ private fun videoMeta(item: VideoItem, withSize: Boolean = true): String {
  */
 @Composable
 fun rememberMediaDuration(item: VideoItem): Long {
+    // 条目本身带时长（本地视频由 MediaStore 扫出，网络视频抽帧后也会写回）时不需要
+    // 订阅任何东西：本地一屏二十张卡就能少挂二十套生命周期监听，滚动明显更轻。
+    if (item.durationMs > 0L) return item.durationMs
     val version by Thumbnails.durationVersion.collectAsStateWithLifecycle()
     return remember(item.id, item.durationMs, version) { mediaDuration(item) }
 }
@@ -705,13 +840,56 @@ fun rememberMediaDuration(item: VideoItem): Long {
  * 不会因为一块高饱和实心色跳到眼前。
  */
 @Composable
-private fun FolderArtwork(size: Dp) {
-    Icon(
-        painter = painterResource(R.drawable.folder_card),
-        contentDescription = null,
-        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.82f),
-        modifier = Modifier.size(size),
-    )
+private fun FolderArtwork(fraction: Float = 0f, fixed: Dp? = null) {
+    val context = LocalContext.current
+    val tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.82f)
+    // 矢量图标先栅格化再画。
+    //
+    // 一个目录里三十多个文件夹卡片时，每张卡都要在离屏层里重画一遍矢量路径，
+    // 首次进入要 100ms 以上一帧。同一 tint 的图标在所有卡上是完全一样的，
+    // 所以只栅格化一次（512px 足够任何卡片尺寸）、之后所有卡片共享同一张位图，
+    // 绘制退化成一次 drawImage。尺寸由 layout 修饰器按容器宽度算，不子组合。
+    val bitmap = remember(tint) { folderArtBitmap(context, FOLDER_ART_PX, tint) }
+    val sizeModifier = fixed?.let { Modifier.size(it) }
+        ?: Modifier.iconSized(fraction, min = 42.dp, max = 130.dp)
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = null,
+            modifier = sizeModifier,
+        )
+    } else {
+        Icon(
+            painter = painterResource(R.drawable.folder_card),
+            contentDescription = null,
+            tint = tint,
+            modifier = sizeModifier,
+        )
+    }
+}
+
+/** 文件夹图标预渲染边长；卡片最宽约 130dp（大平板），按 3x 密度留足余量 */
+private const val FOLDER_ART_PX = 512
+
+/** 文件夹图标位图缓存：key = 尺寸 + 颜色，条目极少（同一列表里所有卡共用一张） */
+private val folderArtCache = android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(6)
+
+private fun folderArtBitmap(
+    context: android.content.Context,
+    px: Int,
+    tint: androidx.compose.ui.graphics.Color,
+): androidx.compose.ui.graphics.ImageBitmap? {
+    val key = "$px:${tint.value}"
+    folderArtCache.get(key)?.let { return it }
+    return runCatching {
+        val drawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.folder_card)
+            ?: return null
+        androidx.core.graphics.drawable.DrawableCompat.setTint(drawable, tint.toArgb())
+        drawable.setBounds(0, 0, px, px)
+        val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
+        drawable.draw(android.graphics.Canvas(bmp))
+        bmp.asImageBitmap().also { folderArtCache.put(key, it) }
+    }.getOrNull()
 }
 
 /** 文件夹宫格卡片：本地与网络共用，保持同一套视觉语言 */
@@ -729,67 +907,67 @@ fun MediaFolderGridCard(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectPressedWithTap()
     val flashClick = rememberFlashClick(onClick)
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val compact = maxWidth < 100.dp
-        // 图标放大到图形区的六成多，视觉上和铺满的缩略图同一个体量，
-        // 不再出现「小图标浮在一大块空白中间」的空旷感
-        val iconSize = (maxWidth * 0.72f).coerceIn(42.dp, 130.dp)
-        Column(
-            modifier = Modifier
+    // 这里原来用 BoxWithConstraints 取 maxWidth 来决定图标尺寸与字号。
+    // 它是 SubcomposeLayout：每张卡都要在**离屏图层内**再跑一次子组合，
+    // 一屏三十多个文件夹卡片时，进入目录的首次绘制实测要 147ms 一帧。
+    // 字号按屏幕宽度分档（与 adaptiveMediaGridMinSize 的档位一致），
+    // 图标尺寸交给 layout 修改器按实际宽度算 —— 纯测量，不再子组合。
+    val compact = LocalConfiguration.current.screenWidthDp < 480
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectionCardOutline(pressed = pressed, selected = selected, selecting = selecting)
+            .combinedClickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = flashClick,
+                onClickLabel = if (selecting) "选中/取消选择" else "打开",
+                onLongClick = onLongClick,
+                onLongClickLabel = if (onLongClick != null) "更多操作" else null,
+                role = Role.Button,
+            ),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // 图形区与缩略图同尺寸：图标铺满这一块，卡片边界即内容边界
+        Box(
+            Modifier
                 .fillMaxWidth()
-                .selectionCardOutline(pressed = pressed, selected = selected, selecting = selecting)
-                .combinedClickable(
-                    interactionSource = interaction,
-                    indication = null,
-                    onClick = flashClick,
-                    onClickLabel = if (selecting) "选中/取消选择" else "打开",
-                    onLongClick = onLongClick,
-                    onLongClickLabel = if (onLongClick != null) "更多操作" else null,
-                    role = Role.Button,
-                ),
+                .aspectRatio(16f / 9f),
+            contentAlignment = Alignment.Center,
+        ) {
+            // 直接展示文件夹图标，不加灰白色背景块去扩充成卡片形状
+            FolderArtwork(fraction = 0.72f)
+            SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 5.dp, vertical = 5.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // 图形区与缩略图同尺寸：图标铺满这一块，卡片边界即内容边界
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f),
-                contentAlignment = Alignment.Center,
-            ) {
-                // 直接展示文件夹图标，不加灰白色背景块去扩充成卡片形状
-                FolderArtwork(size = iconSize)
-                SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
-            }
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 5.dp, vertical = 5.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                // 标题固定单行并占固定高度，保证长短名称的卡片高度完全一致。
+            // 标题固定单行并占固定高度，保证长短名称的卡片高度完全一致。
+            Text(
+                name,
+                style = if (compact) {
+                    MaterialTheme.typography.labelMedium
+                } else {
+                    MaterialTheme.typography.titleSmall
+                },
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().height(18.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+                if (subtitle.isNotBlank()) {
                 Text(
-                    name,
-                    style = if (compact) {
-                        MaterialTheme.typography.labelMedium
-                    } else {
-                        MaterialTheme.typography.titleSmall
-                    },
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().height(18.dp),
-                    maxLines = 1,
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (subtitle.isNotBlank()) {
-                    Text(
-                        subtitle,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = subtitleMaxLines,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
         }
     }
@@ -832,7 +1010,7 @@ fun MediaFolderRow(
                 .size(width = 132.dp, height = 76.dp),
             contentAlignment = Alignment.Center,
         ) {
-            FolderArtwork(size = 64.dp)
+            FolderArtwork(fixed = 64.dp)
             SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(4.dp))
         }
         // 列表行只保留单行标题：与左侧图标严格垂直居中齐平。

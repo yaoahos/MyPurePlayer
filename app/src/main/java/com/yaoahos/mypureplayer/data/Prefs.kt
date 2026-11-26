@@ -46,7 +46,7 @@ object PlayModes {
         NO_AUTO -> "每个视频播完就暂停"
         LOOP_ALL -> "播完最后一集回到第一集"
         LOOP_ONE -> "反复播放当前这一集"
-        SHUFFLE -> "随机切换到队列里的另一集"
+        SHUFFLE -> "每集随机播放且不重复，全部播完暂停"
         else -> "依次播放，最后一集播完暂停"
     }
 }
@@ -71,6 +71,11 @@ data class AppSettings(
      * false 对应「不连播」，首次读取时按旧键迁移，老用户行为不变。
      */
     val playMode: Int = 1,
+    /**
+     * 播完是否退出播放页。默认关闭：停在最后一帧的暂停界面，便于回看片尾/字幕。
+     * 打开后，播完暂停、顺序播完、随机一轮播完都会自动返回进入播放页前的页面。
+     */
+    val exitPlayerWhenDone: Boolean = false,
     val resumePlayback: Boolean = true,
     /**
      * 无痕播放：开启后不再写新的观看历史与播放进度，已有记录保留不动。
@@ -93,6 +98,21 @@ data class AppSettings(
     val smbBrowserGrid: Boolean = true,
     val smbBrowserSort: String = "NAME",
     val smbBrowserAscending: Boolean = true,
+    /** 本地视频页的排列与排序、浏览方式（持久化，退出重进 / 冷启动后保持） */
+    val localGrid: Boolean = true,
+    val localSort: String = "DATE",
+    val localAscending: Boolean = false,
+    val localBrowseMode: Int = 1,
+    /** 回收站的排列与排序（持久化） */
+    val trashGrid: Boolean = true,
+    val trashSort: String = "DATE",
+    val trashAscending: Boolean = false,
+    /** 保险箱的排列与排序（持久化） */
+    val vaultGrid: Boolean = true,
+    val vaultSort: String = "DATE",
+    val vaultAscending: Boolean = false,
+    /** 播放列表详情页的排列方式（持久化；列表顺序本身另存于播放列表数据） */
+    val playlistGrid: Boolean = false,
     /**
      * 回收站自动清理。
      *
@@ -132,6 +152,7 @@ class SettingsRepo(private val context: Context) {
         val hwDecode = booleanPreferencesKey("hw_decode")
         val autoNext = booleanPreferencesKey("auto_next")
         val playMode = intPreferencesKey("play_mode")
+        val exitPlayerWhenDone = booleanPreferencesKey("exit_player_when_done")
         val resume = booleanPreferencesKey("resume")
         val incognito = booleanPreferencesKey("incognito")
         val autoCheckUpdate = booleanPreferencesKey("auto_check_update")
@@ -143,6 +164,17 @@ class SettingsRepo(private val context: Context) {
         val smbBrowserGrid = booleanPreferencesKey("smb_browser_grid")
         val smbBrowserSort = stringPreferencesKey("smb_browser_sort")
         val smbBrowserAscending = booleanPreferencesKey("smb_browser_ascending")
+        val localGrid = booleanPreferencesKey("local_grid")
+        val localSort = stringPreferencesKey("local_sort")
+        val localAscending = booleanPreferencesKey("local_ascending")
+        val localBrowseMode = intPreferencesKey("local_browse_mode")
+        val trashGrid = booleanPreferencesKey("trash_grid")
+        val trashSort = stringPreferencesKey("trash_sort")
+        val trashAscending = booleanPreferencesKey("trash_ascending")
+        val vaultGrid = booleanPreferencesKey("vault_grid")
+        val vaultSort = stringPreferencesKey("vault_sort")
+        val vaultAscending = booleanPreferencesKey("vault_ascending")
+        val playlistGrid = booleanPreferencesKey("playlist_grid")
         val trashAutoClean = booleanPreferencesKey("trash_auto_clean")
         val trashRetentionDays = intPreferencesKey("trash_retention_days")
     }
@@ -160,6 +192,7 @@ class SettingsRepo(private val context: Context) {
             hardwareDecode = prefs[Keys.hwDecode] ?: true,
             autoPlayNext = prefs[Keys.autoNext] ?: true,
             playMode = prefs[Keys.playMode] ?: if (prefs[Keys.autoNext] == false) 0 else 1,
+            exitPlayerWhenDone = prefs[Keys.exitPlayerWhenDone] ?: false,
             resumePlayback = prefs[Keys.resume] ?: true,
             incognito = prefs[Keys.incognito] ?: false,
             autoCheckUpdate = prefs[Keys.autoCheckUpdate] ?: true,
@@ -171,6 +204,17 @@ class SettingsRepo(private val context: Context) {
             smbBrowserGrid = prefs[Keys.smbBrowserGrid] ?: true,
             smbBrowserSort = prefs[Keys.smbBrowserSort] ?: "NAME",
             smbBrowserAscending = prefs[Keys.smbBrowserAscending] ?: true,
+            localGrid = prefs[Keys.localGrid] ?: true,
+            localSort = prefs[Keys.localSort] ?: "DATE",
+            localAscending = prefs[Keys.localAscending] ?: false,
+            localBrowseMode = prefs[Keys.localBrowseMode] ?: 1,
+            trashGrid = prefs[Keys.trashGrid] ?: true,
+            trashSort = prefs[Keys.trashSort] ?: "DATE",
+            trashAscending = prefs[Keys.trashAscending] ?: false,
+            vaultGrid = prefs[Keys.vaultGrid] ?: true,
+            vaultSort = prefs[Keys.vaultSort] ?: "DATE",
+            vaultAscending = prefs[Keys.vaultAscending] ?: false,
+            playlistGrid = prefs[Keys.playlistGrid] ?: false,
             trashAutoClean = prefs[Keys.trashAutoClean] ?: true,
             trashRetentionDays = prefs[Keys.trashRetentionDays] ?: 30,
         )
@@ -199,6 +243,7 @@ class SettingsRepo(private val context: Context) {
             it[Keys.hwDecode] = s.hardwareDecode
             it[Keys.autoNext] = s.autoPlayNext
             it[Keys.playMode] = s.playMode
+            it[Keys.exitPlayerWhenDone] = s.exitPlayerWhenDone
             it[Keys.resume] = s.resumePlayback
             it[Keys.autoCheckUpdate] = s.autoCheckUpdate
             it[Keys.pipOnHome] = s.pipOnHome
@@ -208,6 +253,17 @@ class SettingsRepo(private val context: Context) {
             it[Keys.smbBrowserGrid] = s.smbBrowserGrid
             it[Keys.smbBrowserSort] = s.smbBrowserSort
             it[Keys.smbBrowserAscending] = s.smbBrowserAscending
+            it[Keys.localGrid] = s.localGrid
+            it[Keys.localSort] = s.localSort
+            it[Keys.localAscending] = s.localAscending
+            it[Keys.localBrowseMode] = s.localBrowseMode
+            it[Keys.trashGrid] = s.trashGrid
+            it[Keys.trashSort] = s.trashSort
+            it[Keys.trashAscending] = s.trashAscending
+            it[Keys.vaultGrid] = s.vaultGrid
+            it[Keys.vaultSort] = s.vaultSort
+            it[Keys.vaultAscending] = s.vaultAscending
+            it[Keys.playlistGrid] = s.playlistGrid
         }
     }
 
@@ -253,6 +309,10 @@ class SettingsRepo(private val context: Context) {
         }
     }
 
+    suspend fun setExitPlayerWhenDone(value: Boolean) {
+        context.settingsDataStore.edit { it[Keys.exitPlayerWhenDone] = value }
+    }
+
     suspend fun setResumePlayback(value: Boolean) {
         context.settingsDataStore.edit { it[Keys.resume] = value }
     }
@@ -287,5 +347,34 @@ class SettingsRepo(private val context: Context) {
             it[Keys.smbBrowserSort] = sort
             it[Keys.smbBrowserAscending] = ascending
         }
+    }
+
+    suspend fun setLocalLayout(grid: Boolean, sort: String, ascending: Boolean, browseMode: Int) {
+        context.settingsDataStore.edit {
+            it[Keys.localGrid] = grid
+            it[Keys.localSort] = sort
+            it[Keys.localAscending] = ascending
+            it[Keys.localBrowseMode] = browseMode
+        }
+    }
+
+    suspend fun setTrashLayout(grid: Boolean, sort: String, ascending: Boolean) {
+        context.settingsDataStore.edit {
+            it[Keys.trashGrid] = grid
+            it[Keys.trashSort] = sort
+            it[Keys.trashAscending] = ascending
+        }
+    }
+
+    suspend fun setVaultLayout(grid: Boolean, sort: String, ascending: Boolean) {
+        context.settingsDataStore.edit {
+            it[Keys.vaultGrid] = grid
+            it[Keys.vaultSort] = sort
+            it[Keys.vaultAscending] = ascending
+        }
+    }
+
+    suspend fun setPlaylistGrid(grid: Boolean) {
+        context.settingsDataStore.edit { it[Keys.playlistGrid] = grid }
     }
 }

@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用图标前景 · 深色模式（只给应用内「更多 / 关于」的徽章用）。
+
+     drawable-night 已撤掉，桌面图标不再有夜间前景；这里只被徽章按
+     isDarkScheme() 显式选中。改动只需改这一份，没有副本要同步。
+
+     除投影层颜色外，与 drawable/ic_launcher_foreground.xml 逐字一致：
+     盘面渐变、接触暗环、三角的圆角/缩放/位移全部照搬。球的设计理由
+     （亮心位置、暗环 60%、三角 1.125 缩放）见浅色版的注释，此处不重复。
+
+     唯一差异 —— 投影必须换色：
+
+       浅色版用 #3C5C94（深蓝），它比白板暗，落在板上是阴影。同一层放到
+       深色底板 #28313F 上，反而比板亮，球外会读成一圈偏亮的蓝光晕
+       （实测很显眼，纯黑壁纸最明显）。
+
+       所以这里换成真正的暗影 #050A12：L* 约 2，任何档位的深板都比它亮，
+       叠上去才是「压在板上」。透明度也抬了一档（47% / 29%，浅色版是
+       25% / 16%），因为深板上阴影本来就没什么可见余量，不给足就等于没有。
+
+       三档实测（深板上渲染、只换前景）：
+         - 保留蓝投影 → 球外一圈亮光环，读作发光的贴纸
+         - 换暗影     → 球下有落影，球与板的关系自然（采用）
+         - 去掉投影   → 球贴在板上，边缘突兀
+
+     维护提示：改浅色版前景时，除投影三色外必须同步本文件。
+     落地日期 2026-11-26，与第 27 版浅色图标同时定版。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- ① 投影：rx 24 < 盘半径 28.8，不出左右，只从下沿露出一条软影 -->
+    <group
+        android:pivotX="54.5"
+        android:pivotY="82"
+        android:scaleY="0.25">
+        <path android:pathData="M54.5,58 C67.75,58 78.5,68.75 78.5,82 C78.5,95.25 67.75,106 54.5,106 C41.25,106 30.5,95.25 30.5,82 C30.5,68.75 41.25,58 54.5,58 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="radial"
+                    android:centerX="54.5"
+                    android:centerY="82"
+                    android:gradientRadius="24">
+                    <item android:offset="0" android:color="#78050A12" />
+                    <item android:offset="0.4" android:color="#4A050A12" />
+                    <item android:offset="1" android:color="#00050A12" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- ② 盘面：亮心 (54,36.6)，10% 就到 #86A6FF，末端 #2350DC。
+         球感全靠这一层：亮芯到盘底跨 23 L*，中间单调下降，没有平台段。 -->
+    <path android:pathData="M54,25.2 C69.91,25.2 82.8,38.09 82.8,54 C82.8,69.91 69.91,82.8 54,82.8 C38.09,82.8 25.2,69.91 25.2,54 C25.2,38.09 38.09,25.2 54,25.2 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="36.6"
+                android:gradientRadius="34.6">
+                <item android:offset="0" android:color="#F7A6C0FF" />
+                <item android:offset="0.10" android:color="#F786A6FF" />
+                <item android:offset="0.28" android:color="#F75F88FF" />
+                <item android:offset="0.52" android:color="#F74776FB" />
+                <item android:offset="0.75" android:color="#F73363F0" />
+                <item android:offset="0.90" android:color="#F72A5AE6" />
+                <item android:offset="1" android:color="#F72350DC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- ②b 接触暗边：0.72→1.0 的渐进暗环，末端 21%。
+         只压最外 8 个单位、没有折点，作用是「收口」而不是描边：
+         球面渐变负责明暗，这一层负责让轮廓在浅底板上有个边。 -->
+    <group>
+        <clip-path android:pathData="M54,25.2 C69.91,25.2 82.8,38.09 82.8,54 C82.8,69.91 69.91,82.8 54,82.8 C38.09,82.8 25.2,69.91 25.2,54 C25.2,38.09 38.09,25.2 54,25.2 Z" />
+        <path android:pathData="M54,25.2 C69.91,25.2 82.8,38.09 82.8,54 C82.8,69.91 69.91,82.8 54,82.8 C38.09,82.8 25.2,69.91 25.2,54 C25.2,38.09 38.09,25.2 54,25.2 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="radial"
+                    android:centerX="54"
+                    android:centerY="54"
+                    android:gradientRadius="28.8">
+                    <item android:offset="0" android:color="#00000000" />
+                    <item android:offset="0.5" android:color="#00000000" />
+                    <item android:offset="0.72" android:color="#0616233F" />
+                    <item android:offset="0.87" android:color="#1016233F" />
+                    <item android:offset="0.95" android:color="#1E16233F" />
+                    <item android:offset="1" android:color="#3716233F" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+
+    <!-- ③ 播放三角：缩放 1.125 后包围盒 25.3 × 26.9（盘径的 44% × 47%）。
+         pivot (55.5,54) 是原包围盒中心；translateX=+0.48 是给尖头形状的补偿 ——
+         三角形质心在宽度 1/3 处，几何居中会读成偏左，必须略右。 -->
+    <group
+        android:pivotX="55.5"
+        android:pivotY="54"
+        android:scaleX="1.125"
+        android:scaleY="1.125"
+        android:translateX="0.48">
+
+        <path
+            android:pathData="M43.4,43.03 A1.10,1.10 0 0 1 45.02,42.06 L65.93,53.12 A1.00,1.00 0 0 1 65.93,54.88 L45.02,65.94 A1.10,1.10 0 0 1 43.4,64.97 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="44"
+                    android:startY="42.7"
+                    android:endX="64"
+                    android:endY="66">
+                    <item android:offset="0" android:color="#FFFFFFFF" />
+                    <item android:offset="0.45" android:color="#FFFAFCFF" />
+                    <item android:offset="1" android:color="#FFF1F6FF" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- 三角内部的玻璃棱：左上亮、右下暗，clip 在三角内 -->
+        <group>
+            <clip-path android:pathData="M43.4,43.03 A1.10,1.10 0 0 1 45.02,42.06 L65.93,53.12 A1.00,1.00 0 0 1 65.93,54.88 L45.02,65.94 A1.10,1.10 0 0 1 43.4,64.97 Z" />
+            <path android:pathData="M41,37h28v34h-28z">
+                <aapt:attr name="android:fillColor">
+                    <gradient
+                        android:type="linear"
+                        android:startX="43.4"
+                        android:startY="42.7"
+                        android:endX="62"
+                        android:endY="66">
+                        <item android:offset="0" android:color="#70FFFFFF" />
+                        <item android:offset="0.5" android:color="#14FFFFFF" />
+                        <item android:offset="1" android:color="#00FFFFFF" />
+                    </gradient>
+                </aapt:attr>
+            </path>
+        </group>
+
+        <!-- 三角描边：0.45 宽、峰值 12% 白，只做边缘收口，不做发光 -->
+        <path
+            android:pathData="M43.4,43.03 A1.10,1.10 0 0 1 45.02,42.06 L65.93,53.12 A1.00,1.00 0 0 1 65.93,54.88 L45.02,65.94 A1.10,1.10 0 0 1 43.4,64.97 Z"
+            android:strokeWidth="0.45"
+            android:strokeLineCap="butt"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="44"
+                    android:startY="41"
+                    android:endX="66"
+                    android:endY="68">
+                    <item android:offset="0" android:color="#1FFFFFFF" />
+                    <item android:offset="0.45" android:color="#10FFFFFF" />
+                    <item android:offset="1" android:color="#06FFFFFF" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

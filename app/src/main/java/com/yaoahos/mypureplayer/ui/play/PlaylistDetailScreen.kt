@@ -26,8 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -40,7 +38,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
@@ -50,12 +48,12 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,6 +75,7 @@ import com.yaoahos.mypureplayer.data.Graph
 import com.yaoahos.mypureplayer.data.SortKey
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.playback.Playback
+import com.yaoahos.mypureplayer.ui.FileLocation
 import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.ConfirmDialog
 import com.yaoahos.mypureplayer.ui.components.EmptyState
@@ -175,7 +174,11 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
     var sortSheetOpen by remember { mutableStateOf(false) }
     var sortKey by remember { mutableStateOf(SortKey.DATE) }
     var ascending by remember { mutableStateOf(true) }
-    var gridMode by remember { mutableStateOf(false) }
+    val appSettings by Graph.settings.settings.collectAsStateWithLifecycle(
+        initialValue = Graph.settings.currentOrNull() ?: com.yaoahos.mypureplayer.data.AppSettings(),
+    )
+    var gridMode by remember { mutableStateOf(appSettings.playlistGrid) }
+    LaunchedEffect(appSettings.playlistGrid) { gridMode = appSettings.playlistGrid }
     var previewSort by remember { mutableStateOf<Pair<SortKey, Boolean>?>(null) }
     var previewGrid by remember { mutableStateOf<Boolean?>(null) }
     var addSheetOpen by remember { mutableStateOf(false) }
@@ -277,12 +280,21 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                             // 只清观看记录，不移出播放列表；选中项没有历史时置灰。
                             // 用 forceMore 收进「更多」，前三个主操作保持原样。
                             SelectionAction(
-                                Icons.Rounded.History,
+                                Icons.Rounded.DeleteSweep,
                                 "删除历史",
                                 enabled = selectedItems.isNotEmpty() && hasHistory,
                             ) {
                                 val targets = selectedItems
                                 if (targets.isNotEmpty()) pendingHistoryDelete = targets
+                            },
+                            // 找文件位置：同样在「更多」里。跳过去之后返回按目录树走，不回来处。
+                            SelectionAction(
+                                Icons.Rounded.FolderOpen,
+                                "在文件夹中显示",
+                                enabled = soloItem?.let { FileLocation.available(it) } == true,
+                            ) {
+                                soloItem?.let { FileLocation.open(navController, it) }
+                                selection.exit()
                             },
                         ),
                         forceMore = true,
@@ -443,9 +455,9 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                     item(key = "now-hero") { hero() }
                                 }
                                 item(key = "play-all") { playAll() }
-                                itemsIndexed(shownMembers, key = { _, item -> item.id }) { index, item ->
+                                items(shownMembers, key = { it.id }) { item ->
                                     val isSelected = selection.contains(item.id)
-                                    // 「最近播放」呈选中态：蓝竖条 + 蓝序号 + 淡蓝底。
+                                    // 「最近播放」呈选中态：蓝竖条 + 淡蓝底。
                                     // 与本地卡片不同，这里逐条显示观看进度：当前项用实时位置，其余读历史续播位置。
                                     val isRecentItem = recentId == item.id
                                     val isCurrent = playerState.item?.id == item.id
@@ -505,24 +517,15 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                                     Modifier
                                                         .width(3.dp)
                                                         .height(40.dp)
-                                                        .clip(RoundedCornerShape(2.dp))
-                                                        .background(MaterialTheme.colorScheme.primary),
+                                                        // 圆角走 background 的 outline，不建离屏图层
+                                                        .background(
+                                                            MaterialTheme.colorScheme.primary,
+                                                            RoundedCornerShape(2.dp),
+                                                        ),
                                                 )
                                             }
                                         }
                                         Spacer(Modifier.size(8.dp))
-                                        // 序号：最近播放项着主色，其余为次要色
-                                        Text(
-                                            "${index + 1}",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = if (isRecentItem && !selection.active) {
-                                                MaterialTheme.colorScheme.primary
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                            textAlign = TextAlign.Center,
-                                            modifier = Modifier.width(24.dp),
-                                        )
                                         Box(Modifier.size(width = 104.dp, height = 60.dp)) {
                                             VideoThumb(item, Modifier.fillMaxSize(), cornerRadius = PageMetrics.ThumbRadius)
                                         }
@@ -554,18 +557,14 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                                             // 看过 0 秒的视频（没点开过）不画：否则每条都挂一根空的灰色轨道。
                                             if (progressRatio > 0f) {
                                                 Spacer(Modifier.height(4.dp))
-                                                LinearProgressIndicator(
+                                                com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
                                                     progress = { progressRatio },
                                                     modifier = Modifier
                                                         .fillMaxWidth()
-                                                        .height(3.dp)
-                                                        .clip(RoundedCornerShape(2.dp)),
-                                                    color = if (isRecentItem) {
-                                                        MaterialTheme.colorScheme.primary
-                                                    } else {
-                                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                                    },
-                                                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
+                                                        .height(3.dp),
+                                                    // 全站观看进度统一用主题色；「正在播放」也只靠卡片本身区分
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
                                                 )
                                             }
                                         }
@@ -608,12 +607,14 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
                 previewSort = null
                 previewGrid = null
                 sortSheetOpen = false
+                scope.launch { Graph.settings.setPlaylistGrid(grid) }
                 if (isNowPlaying) {
                     Playback.reorderQueue(ordered)
                 } else {
                     scope.launchUi { Graph.playlists.reorder(playlistId, ordered) }
                 }
-                Notice.success("已按「${key.label}」重新排列")
+                // 不弹提示：面板里每次点选都已实时预览，确定后列表立刻按新顺序重排，
+                // 结果本身就是反馈；其余五个排序面板入口也都不弹。
             },
         )
     }
@@ -628,6 +629,7 @@ fun PlaylistDetailScreen(navController: NavHostController, playlistId: String) {
             destructive = true,
             onConfirm = {
                 pendingHistoryDelete = null
+                com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(targets.map { it.id })
                 scope.launchUi {
                     val n = Graph.history.removeAll(targets.map { it.id })
                     Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
@@ -779,11 +781,12 @@ private fun NowPlayingHero(
     val accent = com.yaoahos.mypureplayer.ui.components.appGlass().accent
     val progress = if (durationMs > 0L) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
     // 按参照图布局：左侧缩略图 + 中间「状态 / 标题 / 位置·时长」+ 右侧「▶ 播放页」按钮，
-    // 底部一条进度线。标题与时间允许两行（参照图就是折行的），整卡不再是点击区，
-    // 进播放页统一走右侧那个明确的按钮。
+    // 底部一条进度线。标题允许两行，时间必须单行——位置与时长之间若塞换行，
+    // 会在斜杠后断开成「00:02 /」和「01:19」两行，看着像排版出错。
+    // 整卡不再是点击区，进播放页统一走右侧那个明确的按钮。
     val statusLine = if (playing) "正在播放" else "已暂停"
     val timeLine = if (durationMs > 0L) {
-        "${Formats.formatDuration(positionMs)} /\n${Formats.formatDuration(durationMs)}"
+        "${Formats.formatDuration(positionMs)} / ${Formats.formatDuration(durationMs)}"
     } else {
         ""
     }
@@ -818,7 +821,10 @@ private fun NowPlayingHero(
                         timeLine,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
+                        // 位置 / 时长是一整串，宽度不够时宁可省略也不能折行
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -849,14 +855,13 @@ private fun NowPlayingHero(
         // 没开始播（位置还是 0）时不画空轨道：与列表行、宫格卡片的判断保持一致。
         if (durationMs > 0L && positionMs > 0L) {
             Spacer(Modifier.height(8.dp))
-            LinearProgressIndicator(
+            com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
                 progress = { progress },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(2.dp)),
-                color = accent,
-                trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
+                    .height(3.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
             )
         }
     }

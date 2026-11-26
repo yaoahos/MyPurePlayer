@@ -11,6 +11,13 @@ class SmbFailure(
     message: String,
     val technical: String = "",
     cause: Throwable? = null,
+    /**
+     * 顶部提示用的短结论（不超过 8 个字），例如「445 端口不通」。
+     *
+     * [message] 是「原因 + 怎么办」的完整句子，放在错误页或测试面板里；
+     * 顶部提示条只停留两三秒、宽度只有一行，必须再短一级。
+     */
+    val short: String = "",
 ) : Exception(message, cause)
 
 /**
@@ -33,6 +40,9 @@ object SmbDiagnostics {
         val tcpOk = ip != null && canConnect(ip, 445)
 
         val base = SmbErrors.describe(error)
+        // 服务器只说「拒绝访问」时，分不清是没填账号、没填密码还是填错了。
+        // 配置里缺哪一格是一眼看得到的，这一层比猜服务器状态更准。
+        val authIssue = SmbErrors.isAuthFailure(error)
         val hint = when {
             server.host.isBlank() ->
                 "服务器地址是空的：请填写 IP 或主机名，例如 192.168.1.5"
@@ -43,7 +53,22 @@ object SmbDiagnostics {
             !tcpOk ->
                 "能解析到 $ip，但 445 端口连不上：这台设备可能关了文件共享、防火墙拦了 445，或者手机和它不在同一个网络"
 
+            authIssue && server.username.isBlank() ->
+                "这个共享需要账号：请填写用户名（NAS / Windows 上的本地账号，不是邮箱或手机号）"
+
+            authIssue && server.password.isBlank() ->
+                "「${server.username}」的密码是空的：请填写密码后重试"
+
             else -> base
+        }
+        // 顶部提示只要一句结论：分层探测已经把「卡在哪一步」分清楚了
+        val short = when {
+            server.host.isBlank() -> "地址为空"
+            resolved == null -> "找不到设备"
+            !tcpOk -> "445 端口不通"
+            authIssue && server.username.isBlank() -> "账号为空"
+            authIssue && server.password.isBlank() -> "密码为空"
+            else -> SmbErrors.headline(error)
         }
 
         val technical = buildString {
@@ -61,7 +86,7 @@ object SmbDiagnostics {
         }
         Log.w(TAG, technical)
 
-        return SmbFailure(hint, technical, error)
+        return SmbFailure(hint, technical, error, short)
     }
 
     private fun canConnect(host: String, port: Int): Boolean = runCatching {

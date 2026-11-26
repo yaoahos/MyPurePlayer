@@ -48,6 +48,9 @@ object Thumbnails {
     private const val CACHE_DIR = "thumbs"
     private const val TAG = "Thumbnails"
 
+    /** 保险箱缩略图目录（在 filesDir 下，不参与普通缓存的 LRU 淘汰） */
+    private const val VAULT_THUMB_DIR = "vault_thumbs"
+
     /** 缩略图磁盘缓存总上限，超出后按最近使用时间淘汰 */
     private const val DISK_CACHE_LIMIT = 200L * 1024 * 1024
 
@@ -67,6 +70,9 @@ object Thumbnails {
 
     /** 「取不出画面」落盘标记的有效期：过期后自动重试，避免偶发网络故障让视频永久没图 */
     private const val NO_THUMB_TTL_MS = 7L * 24 * 60 * 60 * 1000
+
+    /** 缓存命中的最小「刷新修改时间」间隔，只服务于磁盘 LRU 的淘汰顺序 */
+    private const val TOUCH_MIN_GAP_MS = 12L * 60 * 60 * 1000
     // 卡片上的图会被放大到 100~200dp 显示，256px 的源在上屏后明显发糊，
     // 尤其手机 3 列宫格与平板 1~2 列列表。这里按「两倍于最大显示宽度」取：
     // 本地 720px、网络 640px（网络再大只是多耗 SMB 流量，视觉提升有限）。
@@ -85,12 +91,21 @@ object Thumbnails {
     /**
      * 位图内存缓存上限。
      *
-     * 缩略图分辨率提到 640~720px 后单张约 0.5~0.9MB（RGB_565），16MB 只放得下
-     * 二十来张，滚动时会频繁回读磁盘；这里放宽到 24MB，够一屏半的卡片常驻，
-     * 也不至于在低内存机型上把堆顶满（不再申请 largeHeap）。
-     * 尺寸仍按 byteCount 计，缓存条目按 LRU 淘汰。
+     * 单张 640px 16:9 的 RGB_565 位图约 460KB。原来固定 24MB 只能放五十来张，
+     * 而本地一个 Camera 目录就能有一百多条：用户把列表滑到底，首屏那批早已被
+     * LRU 挤出去，返回再进来必须重新从磁盘解码 —— 这就是「每次新进入都要
+     * 重新加载缩略图」的直接原因。
+     *
+     * 改成按堆大小给额度（1/8，24~64MB）：常见 256MB 堆的机器拿到 32MB（约七十张），
+     * 512MB 的拿到 64MB（一百四十张），一个目录基本能整屏留住。
+     * 仍不申请 largeHeap，低内存回调 [trimMemory] 里照旧会主动裁剪。
      */
-    private val memory = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
+    private val memoryBudgetBytes: Int = run {
+        val heap = Runtime.getRuntime().maxMemory()
+        (heap / 8).coerceIn(24L * 1024 * 1024, 64L * 1024 * 1024).toInt()
+    }
+
+    private val memory = object : LruCache<String, Bitmap>(memoryBudgetBytes) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
@@ -143,6 +158,17 @@ object Thumbnails {
     }
 
     private val localSemaphore = Semaphore(4)
+
+    /**
+     * 磁盘缓存解码的并发上限。
+     *
+     * 进一个目录时首屏十几张卡会同时请求，每张都要做一次 640px JPEG 解码（约 10ms）
+     * 并分配 460KB 位图。全部并发时瞬时就是十几 MB 的分配 + 十几个核上的解码，
+     * 冷启动后第一次进大目录会有一两帧掉到 100~200ms。
+     * 限到 4 路后依旧是一提交就开始出图，只是不会一帧之内把 CPU 和分配器打满；
+     * 后面的卡片晚几十毫秒出现，观感上比"整页顿一下"好得多。
+     */
+    private val decodeSemaphore = Semaphore(4)
     // 网络抽帧并发：2 路足够（一张封面只要几百 KB），再多只会把 SMB 会话挤满，
     // 连列目录和首帧都排在后面，用户感受就是「进文件夹慢、打开视频慢」。
     // 网络抽帧一次只跑一张。
@@ -197,10 +223,53 @@ object Thumbnails {
 
     fun pauseRemoteThumbs() {
         remotePaused = true
+        // 预热链立刻停手：它每一张都要从同一个共享读几 MB，正好压在首帧的 moov/首个
+        // 视频块读取上 —— 2.4G 下两路抽帧能把起播拖慢好几秒（用户反馈「SMB 头一次播放
+        // 又卡了」）。已经发出去的那一次读打断不了（阻塞的 smbj 调用不响应取消），
+        // 但不会再排下一张。
+        prefetchJob?.cancel()
+        prefetchJob = null
     }
 
+    /**
+     * 恢复网络抽帧。
+     *
+     * 除了翻标记，还要主动叫醒那些被暂缓过的卡片：它们在拿到 null 之后会一直
+     * 等 [thumbVersion] 变化再重试（见 VideoThumb 的 produceState），若此刻队列里
+     * 没有任何一张图跑完，版本号永远不会动 —— 卡片就永久停在占位图标上。
+     * 真机上表现为「播过一次网络视频之后，历史记录里的网络封面再也不出现」。
+     */
     fun resumeRemoteThumbs() {
+        if (!remotePaused) return
         remotePaused = false
+        _thumbVersion.value = _thumbVersion.value + 1
+    }
+
+    /**
+     * 页面转场期间暂停**新生成**本地缩略图。
+     *
+     * 首次进视频多的文件夹（Camera 一百多条）时，首屏十几张卡会在同一帧里
+     * 各自取系统缩略图 + 分配位图 + JPEG 落盘 + 触发重组，主线程实测掉 33 帧
+     * （约 275ms），正好压在页面滑入动画上，表现就是「进入卡一下」。
+     *
+     * 但暂停的语义必须是「不许现生成」，不能连磁盘缓存也一起挡 —— 之前实现成
+     * [load] 开头直接返回 null，导致**每次**进文件夹（哪怕图早就落盘了）都要先
+     * 空一屏图标、等 320ms 转场结束才补图，看起来就是「每次都重新加载」。
+     * 现在这个标记只在 [loadSlow] 走到「必须现生成」那段之前才生效：
+     * 缓存命中的解码照常立即返回（十几 ms，转场期间完成，卡片一出现就有图）。
+     */
+    @Volatile
+    private var localPaused = false
+
+    fun pauseLocalThumbs() {
+        localPaused = true
+    }
+
+    fun resumeLocalThumbs() {
+        if (!localPaused) return
+        localPaused = false
+        // 叫醒转场期间拿到 null、正在等版本号重试的卡片
+        _thumbVersion.value = _thumbVersion.value + 1
     }
 
     /**
@@ -218,10 +287,6 @@ object Thumbnails {
      */
     private val _durationVersion = kotlinx.coroutines.flow.MutableStateFlow(0)
     val durationVersion: kotlinx.coroutines.flow.StateFlow<Int> = _durationVersion
-
-    /** 已播放集合的版本号：网络视频播放后登记，列表订阅它来触发缩略图重取。 */
-    private val _playedVersion = kotlinx.coroutines.flow.MutableStateFlow(0)
-    val playedVersion: kotlinx.coroutines.flow.StateFlow<Int> = _playedVersion
 
     /**
      * 抽帧放在独立作用域里：列表滚动导致 Compose 协程取消时，SMB 抽帧不会跟着中断，
@@ -381,7 +446,11 @@ object Thumbnails {
             // 注意：不在这里主动抽帧——播放中 SMB 大文件正被 HTTP Range 读取，
             // 并发抽帧会抢同一条 SMB 通道，导致播放器首帧失败（connection failed）。
             // 返回列表后由 VideoThumb 按需加载，已验证能正常生成。
-            _playedVersion.value += 1
+            //
+            // 用 epoch 而不是另开一个 playedVersion：卡片每订阅一个全局版本号都要挂
+            // 一套生命周期监听，一屏二十张卡就是二十套；两者语义本来就是「让卡片重取」，
+            // 合并成一个既有版本号即可。
+            _epoch.value += 1
         }
     }
 
@@ -526,12 +595,31 @@ object Thumbnails {
         }
     }
 
+    /**
+     * 只查内存缓存，同步返回，用于卡片的**首帧**。
+     *
+     * 卡片原来一律从 null 起步、等协程跑完再 setValue：哪怕图早就在内存里，
+     * 屏幕上的第一帧画的也是占位图标，下一帧才"闪"成缩略图 —— 每次进文件夹、
+     * 每次从播放页返回，整屏都会先闪一下图标，看起来就像"每次都在重新加载"。
+     *
+     * 这里在主线程做一次 LruCache 查找（纯内存 Map，微秒级），命中就把它当作
+     * 首帧的初值，卡片一出现就是图；未命中再交给 [load] 走磁盘/生成。
+     */
+    fun memoryCached(item: VideoItem): Bitmap? {
+        if (item.source == MediaSource.STREAM) return null
+        return memory.get(keyOf(item))
+    }
+
     suspend fun load(context: Context, item: VideoItem, server: SmbServer? = null): Bitmap? {
         if (item.source == MediaSource.STREAM) return null
         val key = keyOf(item)
         val remote = item.source == MediaSource.SMB
         val maxWidth = if (remote) MAX_WIDTH_REMOTE else MAX_WIDTH_LOCAL
         memory.get(key)?.let { return it }
+
+        // 注意：这里**不能**因为 [localPaused] 直接返回 null。
+        // 暂停只针对「现生成」（取系统缩略图 / 抽帧），见 loadSlow 里的判断。
+        // 放在这里的旧实现连磁盘缓存一起挡住了，结果是每次进文件夹都要先空一屏图标。
 
         // 内存未命中后的所有路径（读时长、缓存目录清理、JPEG 解码、落盘）都是
         // 磁盘/CPU 工作，几十 ms 量级；调用方的 produceState 协程跑在主线程上，
@@ -543,8 +631,8 @@ object Thumbnails {
      * 重置某个视频的缩略图：丢掉当前这张，换下一档取帧策略重新生成。
      *
      * 抽帧是猜的，自动挑选只保证「不是黑场/白闪/纯色」，未必是用户想看到的那一帧。
-     * 这里每调用一次就换一档（自动 → 30% → 45% → 60% → 75% → 90% → 自动），
-     * 用户可以一直点到自己满意为止。
+     * 这里每调用一次就换一档（自动 → 自动+30s → +60s → +90s → +120s → +150s → 回到自动），
+     * 相邻两档一定错开十几秒，等于换了一个关键帧；走完一轮回到自动，可以一直点下去。
      *
      * 同时清掉「取不出画面」的判定与失败计数：用户明确要求重来，就不该被之前的
      * 结论挡住。
@@ -595,9 +683,10 @@ object Thumbnails {
         ensureCacheVersion(context)
         val file = File(cacheDir(context), "$key.$CACHE_VERSION.jpg")
         if (file.exists()) {
-            decodeSampled(file, maxWidth)?.let {
+            decodeSemaphore.withPermit { decodeSampled(file, maxWidth) }?.let {
                 memory.put(key, it)
                 primeArtwork(appContext, item, it)
+                touchIfStale(file)
                 // 旧缓存可能只有图没有时长：立即返回画面，后台补时长，列表随后自动重排
                 if (!hydrateDuration(context, item) && item.durationMs <= 0L) {
                     workScope.launch { backfillDuration(appContext, item, server) }
@@ -606,18 +695,30 @@ object Thumbnails {
             }
         }
 
+        // ------------------------------------------------------------------
+        // 以下是「必须现生成」的冷路径：取系统缩略图、向 NAS 抽帧、压缩落盘。
+        //
+        // 转场期间（[localPaused]）先不做这些，让滑入动画只用组合与位图绘制，
+        // 避免十几张卡同时分配/压缩把帧率压下去；转场结束后 resumeLocalThumbs()
+        // 会自增版本号，没有图的卡片自行重试。
+        // 缓存命中已在上面直接返回，所以「第二次以后进同一个文件夹」不受这里影响。
+        // ------------------------------------------------------------------
+        if (!remote && localPaused) {
+            Log.d(TAG, "转场中，暂缓生成本地缩略图 ${item.title}")
+            return null
+        }
+
         // 本地 MediaStore 视频：系统早就生成了缩略图，直接取比自己解容器快得多。
-        // 必须放到 IO 线程：取系统缩略图在慢设备上要几百毫秒到几秒，放在主线程会直接卡住列表
+        // 必须放到 IO 线程：取系统缩略图在慢设备上要几百毫秒到几秒，放在主线程会直接卡住列表。
+        // 这里不占 localSemaphore：实测系统缩略图单次只要几毫秒，它不是「进文件夹卡一下」的原因，
+        // 限流反而会让一屏卡片排队更久、出图更慢。
         if (!remote) {
             mediaStoreThumbnail(context, item, maxWidth)?.let {
                 memory.put(key, it)
                 primeArtwork(context, item, it)
-                runCatching {
-                    file.parentFile?.mkdirs()
-                    FileOutputStream(file).use { out ->
-                        it.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY_LOCAL, out)
-                    }
-                }
+                // 落盘放到后台：640px JPEG 压缩单张要 8~15ms，压在返回路径上等于
+                // 每张卡都晚十几毫秒才出图；先给界面位图，写盘不参与首屏时序。
+                persistAsync(file, it, JPEG_QUALITY_LOCAL)
                 return it
             }
         }
@@ -629,6 +730,14 @@ object Thumbnails {
             // 正在播网络视频：不去抢同一条 SMB 通道，先让首帧/快进拿到带宽。
             // 返回列表页会 resumeRemoteThumbs()，那时再按需补图。
             Log.d(TAG, "播放中，暂缓网络抽帧 ${item.title}")
+            return null
+        }
+
+        // 服务器还没从配置里解析出来（冷启动首帧、服务器条目被删）：不发请求。
+        // [extract] 拿不到 server 会直接返回 null，但这一轮会被记成一次「取不出画面」，
+        // 连续两次就落 .nothumb3 —— 之后一周这个视频只剩图标，而它本身完全没问题。
+        if (remote && server == null) {
+            Log.d(TAG, "服务器未就绪，暂缓网络抽帧 ${item.title}")
             return null
         }
 
@@ -662,16 +771,9 @@ object Thumbnails {
                     unsupported.remove(item.id)
                     memory.put(key, frame)
                     primeArtwork(context.applicationContext, item, frame)
-                    runCatching {
-                        file.parentFile?.mkdirs()
-                        FileOutputStream(file).use { out ->
-                            frame.compress(
-                                Bitmap.CompressFormat.JPEG,
-                                if (remote) JPEG_QUALITY_REMOTE else JPEG_QUALITY_LOCAL,
-                                out,
-                            )
-                        }
-                    }
+                    // 压缩落盘不参与本次等待：位图已进内存，界面可以立刻拿到；
+                    // 写盘只影响下次启动能否直接命中
+                    persistAsync(file, frame, if (remote) JPEG_QUALITY_REMOTE else JPEG_QUALITY_LOCAL)
                     runCatching { noThumbMark(context.applicationContext, item).delete() }
                     // 通知列表：之前只拿到占位图标的卡片可以来重取了
                     _thumbVersion.value = _thumbVersion.value + 1
@@ -746,7 +848,7 @@ object Thumbnails {
     private suspend fun extract(context: Context, item: VideoItem, server: SmbServer?): Bitmap? {
         val remote = item.source == MediaSource.SMB
         val maxWidth = if (remote) MAX_WIDTH_REMOTE else MAX_WIDTH_LOCAL
-        // 0 = 自动挑选；1..5 = 用户点过「重置缩略图」后固定取片长的某个百分比
+        // 0 = 自动挑选；1..5 = 用户点过「重置缩略图」后，在自动档时间点上依次 +30s 的偏移档
         val variant = variants[keyOf(item)] ?: 0
         // 并发许可由 extractOutcome 统一持有（那里还负责计时），这里只负责干活。
         return run {
@@ -889,7 +991,9 @@ object Thumbnails {
                                 }
                             }
                             Log.d(TAG, "本地 setDataSource ${System.currentTimeMillis() - tl}ms path=$path")
-                            return@run frameFrom(context, r, item, maxWidth)
+                            // 换图档位对本地同样生效：目前「重置缩略图」只挂网络条目，
+                            // 但这里不传 variant 的话，将来给本地加同一个入口会「点了没变化」。
+                            return@run frameFrom(context, r, item, maxWidth, variant = variant)
                         }
                         MediaSource.STREAM -> return@run null
                     }
@@ -1299,7 +1403,7 @@ object Thumbnails {
         // 只留「片长 10%」和「第一帧」两次，把失败尝试的流量省下来。
         fewProbes: Boolean = false,
         extraDepth: Int = 0,
-        /** 0 = 自动挑选；1..5 = 用户手动换图时固定的片长百分比档位 */
+        /** 0 = 自动挑选；1..5 = 用户手动换图时相对自动档 +30s 的偏移档 */
         variant: Int = 0,
     ): Bitmap? {
         val durationMs = runCatching {
@@ -1312,19 +1416,20 @@ object Thumbnails {
             0L
         }
         val times = when {
-            // 用户点过「重置缩略图」：按档位取片长的固定比例，一档一档换过去。
-            // 每档再带上前后两个邻近点，避免正好落在转场、淡入淡出或纯色画面上。
-            // 没有时长信息时退回一组绝对时间点（15/30/60 秒），总有能出图的一帧。
+            // 用户点过「重置缩略图」：以自动挑选取过的那个时间点为基准往后推，每档 +30 秒。
+            // 30 秒足够跨过一个镜头、甚至换了场景，换图看得出区别；12 秒时同一场戏里
+            // 往往只是人物挪了半步，用户会觉得「点了没变化」。相邻档也不会落在同一关键帧上。
+            // 五档合计最多推到 2.5 分钟处，SMB 仍只读片头附近，不会变成深处的随机读。
+            // 旧实现按片长的 30%/45%/60%/75%/90% 取，一集剧要跳到十几分钟处，每次都是
+            // 一次深处的随机读，几 MB 到十几 MB 全花在换一张封面上（用户反馈「太费流量」）。
+            // 每档再带一个 +5s 的邻近点，避开转场与纯色画面；短片按片长一半兜底。
             variant > 0 -> {
-                val fractions = floatArrayOf(0.30f, 0.45f, 0.60f, 0.75f, 0.90f)
-                val fraction = fractions[(variant - 1) % fractions.size]
-                if (durationMs > 0L) {
-                    val center = (durationMs * 1_000L * fraction).toLong()
-                    val step = 12_000_000L
-                    longArrayOf(center, center + step, center - step, center + 2 * step)
-                } else {
-                    longArrayOf(15_000_000L, 30_000_000L, 60_000_000L)
-                }
+                val step = 30_000_000L
+                val center = (primaryUs + step * variant)
+                    .coerceAtMost(if (durationMs > 0L) durationMs * 500L else Long.MAX_VALUE)
+                    .coerceAtLeast(1_000_000L)
+                val near = 5_000_000L
+                longArrayOf(center, center + near, (center - near).coerceAtLeast(1_000_000L))
             }
             // 片头文件是被截断的前若干 MB：只能取片头几秒的画面，
             // 按「片长 10%」去取必然落在文件之外，所有时间点都会失败。
@@ -1596,6 +1701,46 @@ object Thumbnails {
         return runCatching { BitmapFactory.decodeFile(file.absolutePath, opts) }.getOrNull()
     }
 
+    /**
+     * 把位图压成 JPEG 落盘，不参与调用方时序。
+     *
+     * 压缩单张 640px 要 8~15ms，原来压在「返回位图给界面」之前，等于每张卡都晚
+     * 十几毫秒才出图；首次进一个目录十几张就是两百毫秒的差距。位图已经进内存缓存，
+     * 落盘纯属为下次启动留缓存，没有理由让界面等它。
+     * 写临时文件再改名，避免进程被杀时留下半张图。
+     */
+    private fun persistAsync(file: File, bitmap: Bitmap, quality: Int) {
+        workScope.launch {
+            runCatching {
+                file.parentFile?.mkdirs()
+                val tmp = File(file.parentFile, "${file.name}.${System.nanoTime()}.tmp")
+                try {
+                    FileOutputStream(tmp).use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                    }
+                    if (!tmp.renameTo(file)) tmp.delete()
+                } catch (t: Throwable) {
+                    tmp.delete()
+                    throw t
+                }
+            }
+        }
+    }
+
+    /**
+     * 顺手刷新缓存文件的修改时间。
+     *
+     * [trimDiskCache] 按 lastModified 做 LRU，而「读取」默认不更新它（Android 挂载
+     * 用的是 relatime/noatime）。不补这一下，天天看的封面反而是时间戳最老的，
+     * 一旦缓存超限就先被删掉，下次进来又得重新生成。
+     * 只在超过半天没更新时写一次，避免每次命中都产生一次元数据写。
+     */
+    private fun touchIfStale(file: File) {
+        val now = System.currentTimeMillis()
+        if (now - file.lastModified() < TOUCH_MIN_GAP_MS) return
+        runCatching { file.setLastModified(now) }
+    }
+
     private fun cacheDir(context: Context): File = File(context.cacheDir, CACHE_DIR)
 
     /** 缓存版本迁移只跑一次：清掉旧算法留下的黑屏/花屏缩略图 */
@@ -1617,6 +1762,10 @@ object Thumbnails {
                     it.name.endsWith(".wh") || it.name.startsWith("probe-"))
             }
             ?: return
+        // 异步落盘留下的半成品（写到一半进程被杀）：直接清掉，别当作有效缓存
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.endsWith(".tmp")) runCatching { f.delete() }
+        }
         var total = files.sumOf { it.length() }
         if (total <= DISK_CACHE_LIMIT) return
         for (f in files.sortedBy { it.lastModified() }) {
@@ -1725,6 +1874,10 @@ object Thumbnails {
 
     fun clear(context: Context) {
         memory.evictAll()
+        // 通知封面字节缓存也要清：它和 memory 同批产生，留着会让「清除缓存」后
+        // 通知 / 锁屏仍显示旧封面；且 moveCacheKey 会跟着搬它，清干净才不会把旧字节
+        // 带到新路径。
+        artwork.evictAll()
         // 内存里的「已知时长 / 取不出帧」也要一起清掉，否则点了清除缓存，
         // 这些视频仍然不会再尝试一次，看着就像清除没生效
         knownDurations.clear()
@@ -1735,9 +1888,16 @@ object Thumbnails {
         deepFallbackUsed.clear()
         durationFailed.clear()
         durationInflight.clear()
+        // 已播放集合既在内存也在 played.txt：只清内存的话，下次 ensurePlayedLoaded
+        // 会把文件里的记录重新读回来，等于「清除缓存」对这些条目没生效。
         played.clear()
+        playedLoaded = false
         cacheDir(context).listFiles()?.forEach { runCatching { it.delete() } }
         _durationVersion.value += 1
+        // 卡片拿到图之后就不再重新取值，必须让 epoch 变化，屏幕上这批卡片才会
+        // 重新读一次缓存。没有这一句，清除缓存后当前页仍挂着旧图，直到退出再进来
+        // （历史 / 播放列表 / 回收站都停在同一个画面上，看着就像清除没反应）。
+        _epoch.value += 1
     }
 
     private fun keyOf(item: VideoItem): String {
@@ -1746,7 +1906,139 @@ object Thumbnails {
         // 会变化 —— 行号一变，缩略图缓存与历史播放同时失效，用户看到的就是
         // 「过段时间记录既不能播、也没有图」。路径不随行号变化。
         val stable = item.localPath?.takeIf { it.isNotBlank() } ?: item.id
+        return keyOfStable(stable)
+    }
+
+    private fun keyOfStable(stable: String): String {
         val digest = MessageDigest.getInstance("MD5").digest(stable.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    // ---------------------------------------------------------------- 保险箱
+
+    /**
+     * 保险箱缩略图跟着条目一起走，不从密文重新抽帧。
+     *
+     * 为什么不解密抽帧：保险箱里的视频是分块加密的，取一帧要先解密一片，
+     * 卡顿不说，还等于把「为了看一眼封面就解密媒体内容」写进代码 ——
+     * 与保险箱「内容只在播放时才解密」的前提相冲突。
+     *
+     * 为什么不用 `cache/thumbs`：那是 LRU 目录，按容量淘汰旧图。保险箱的图
+     * 一旦被淘汰就永远补不回来（源文件已经是密文），用户再进来就只剩锁图标。
+     * 所以单独放 `filesDir/vault_thumbs`，只有「用户清缓存」「条目被彻底删除」
+     * 才动它，占用也很小（一条一张，几十 KB）。
+     */
+    private fun vaultThumbDir(context: Context): File =
+        File(context.applicationContext.filesDir, VAULT_THUMB_DIR)
+
+    private fun vaultKey(storedName: String): String = keyOfStable("vault:$storedName")
+
+    private fun vaultThumbFile(context: Context, storedName: String): File =
+        File(vaultThumbDir(context), "${vaultKey(storedName)}.jpg")
+
+    /**
+     * 把一条视频当前的缩略图随它一起搬进保险箱。
+     *
+     * 必须在**明文还在**的时候调用（[VaultRepo.add] 里加密成功、删除原文件之前）：
+     * 先取现成缓存，缓存没有就趁原文件可读补抽一张。取不到就放弃，不阻塞移入。
+     */
+    suspend fun carryIntoVault(context: Context, item: VideoItem, storedName: String) {
+        withContext(Dispatchers.IO) {
+            val app = context.applicationContext
+            val dst = vaultThumbFile(app, storedName)
+            if (dst.exists() && dst.length() > 0L) return@withContext
+            val bitmap = cached(app, item) ?: runCatching {
+                withTimeoutOrNull(8_000L) { load(app, item, null) }
+            }.getOrNull() ?: return@withContext
+            runCatching {
+                dst.parentFile?.mkdirs()
+                FileOutputStream(dst).use {
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY_LOCAL, it)
+                }
+            }
+        }
+    }
+
+    /** 读保险箱条目的缩略图；没有就返回 null，由界面退回锁图标 */
+    fun vaultThumb(context: Context, storedName: String): Bitmap? {
+        val key = vaultKey(storedName)
+        memory.get(key)?.let { return it }
+        val file = vaultThumbFile(context, storedName)
+        if (!file.exists() || file.length() == 0L) return null
+        return runCatching { decodeSampled(file, MAX_WIDTH_LOCAL) }.getOrNull()
+            ?.also { memory.put(key, it) }
+    }
+
+    /**
+     * 移出保险箱时把图搬回本地路径的 key。
+     *
+     * 不搬的话，用户把视频从保险箱恢复出来，列表里又是一枚默认图标 ——
+     * 而这颗文件本身已经没有任何「抽帧成本」问题了，只是图放错了位置。
+     */
+    fun carryOutOfVault(context: Context, storedName: String, restoredPath: String) {
+        val key = vaultKey(storedName)
+        memory.remove(key)
+        val src = vaultThumbFile(context, storedName)
+        if (!src.exists() || src.length() == 0L) return
+        val dst = File(cacheDir(context), "${keyOfStable(restoredPath)}.$CACHE_VERSION.jpg")
+        runCatching {
+            dst.parentFile?.mkdirs()
+            src.copyTo(dst, overwrite = true)
+            src.delete()
+        }
+    }
+
+    /** 彻底删除保险箱条目时清掉它的图，避免留下无主的明文文件 */
+    fun dropVaultThumb(context: Context, storedName: String) {
+        memory.remove(vaultKey(storedName))
+        runCatching { vaultThumbFile(context, storedName).delete() }
+    }
+
+    /** 清空整个保险箱（或重设密码丢弃旧条目）时一次性清干净 */
+    fun dropAllVaultThumbs(context: Context) {
+        runCatching { vaultThumbDir(context).deleteRecursively() }
+    }
+
+    /**
+     * 文件换了路径（删除进回收站 / 重命名 / 移动）后，把缩略图缓存从旧 key 搬到新 key。
+     *
+     * 背景：本地缩略图 key 是 `md5(localPath)`。文件一挪，key 就变，新位置的卡片
+     * 读不到旧图、只能重新抽帧 —— 由于抽帧时间点不固定，用户看到的就是「同一部视频
+     * 删进回收站后封面变了」。保险箱早已用 [carryIntoVault] 做过同类搬运，这里把它
+     * 推广到普通 localPath 之间。文件此刻仍在（rename 已完成、内容不变），直接搬文件
+     * 比重新抽帧更快也更保真；没有旧缓存就什么都不做，新位置会按需重新生成。
+     *
+     * 搬运四类缓存：缩略图 `.jpg`、已知分辨率 `.wh`、失败标记 `.nothumb3`、时长 `.dur`；
+     * 并同步内存缓存，避免这一刻界面还挂在旧 key 的位图上。
+     */
+    fun moveCacheKey(context: Context, fromPath: String, toPath: String) {
+        if (fromPath.isBlank() || toPath.isBlank() || fromPath == toPath) return
+        val from = keyOfStable(fromPath)
+        val to = keyOfStable(toPath)
+        if (from == to) return
+        val dir = cacheDir(context)
+        listOf(
+            "$from.$CACHE_VERSION.jpg" to "$to.$CACHE_VERSION.jpg",
+            "$from.wh" to "$to.wh",
+            "$from.nothumb3" to "$to.nothumb3",
+            // 时长也按路径记：不搬的话，改名 / 移动后的条目副标题会退回「未知」，
+            // “按时长排序”也要等重新抽帧才有值（本地要重新解一次容器）
+            "$from.dur" to "$to.dur",
+        ).forEach { (old, new) ->
+            runCatching {
+                val src = File(dir, old)
+                if (src.exists()) src.renameTo(File(dir, new))
+            }
+        }
+        memory.get(from)?.let { bitmap ->
+            memory.remove(from)
+            memory.put(to, bitmap)
+        }
+        artwork.get(from)?.let { bytes ->
+            artwork.remove(from)
+            artwork.put(to, bytes)
+        }
+        failCounts.remove(from)?.let { failCounts[to] = it }
+        retryCounts.remove(from)?.let { retryCounts[to] = it }
     }
 }

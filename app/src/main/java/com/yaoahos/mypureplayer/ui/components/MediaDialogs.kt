@@ -4,6 +4,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Environment
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -66,6 +69,8 @@ import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -975,6 +980,12 @@ private fun ChoiceBody(
     inOverlay: Boolean,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    // 与 ConfirmDialog / GlassPanelDialog 同一套出现动画：140ms 淡入 + 0.94→1 微缩放。
+    // 只有应用内浮层需要自己画：窗口形态自带系统淡入 + 缩放，再叠一层会动两次。
+    val enter = remember { Animatable(if (inOverlay) 0f else 1f) }
+    LaunchedEffect(inOverlay) {
+        if (inOverlay) enter.animateTo(1f, tween(140, easing = FastOutSlowInEasing))
+    }
     if (inOverlay) {
         // 浮层没有对话框窗口替它拦返回键
         androidx.activity.compose.BackHandler { onDismiss() }
@@ -990,7 +1001,11 @@ private fun ChoiceBody(
     Box(
         Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f))
+            .drawBehind {
+                drawRect(
+                    androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.34f * enter.value)
+                )
+            }
             // 遮罩上**必须关掉 indication**：默认的 M3 水波纹会把当前主题色（蓝）画在
             // 半透明黑遮罩上，点哪冒哪一团 —— 用户看到的「点弹窗外出现蓝色阴影」就是它。
             // 遮罩只是"点外面关掉"的感应面，不该有任何视觉反馈。
@@ -1010,6 +1025,11 @@ private fun ChoiceBody(
                 .widthIn(max = PageMetrics.DialogMaxWidth)
                 .heightIn(max = (windowHeight - 48.dp).coerceAtLeast(240.dp))
                 .verticalScroll(rememberScrollState())
+                .graphicsLayer {
+                    alpha = enter.value
+                    scaleX = 0.94f + 0.06f * enter.value
+                    scaleY = 0.94f + 0.06f * enter.value
+                }
                 // 面板直接用首页那张不透明渐变（淡蓝白），像从页面里裁出来的一块；
                 // 选项条再叠文件夹卡片同款玻璃，层次与首页「淡背景 + 淡蓝玻璃卡」一致。
                 .appDialogSurface(RoundedCornerShape(26.dp))

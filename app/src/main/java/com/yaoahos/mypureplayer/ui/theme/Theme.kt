@@ -44,8 +44,13 @@ enum class ThemePalette(
 ) {
     BLUE("blue", "靛蓝", Color(0xFF2F6BFF)),
     TEAL("teal", "青碧", Color(0xFF0E9E9E)),
-    VIOLET("violet", "紫罗兰", Color(0xFF7C5BD9)),
+    // 原来的 #7C5BD9 色相 256°，与靛蓝只差 33°；深色 primary 的色差 ΔE 只有 14.5，
+    // 两个色点在同一排里几乎分不清。改到 274° 后与靛蓝、绯樱都拉开到 ΔE≈23（深色）
+    VIOLET("violet", "紫罗兰", Color(0xFF9745D4)),
     GREEN("green", "松绿", Color(0xFF2E9E5B)),
+    // 青柠补在琥珀与松绿之间的空档；schemeFrom 会把黄绿系偏亮的明度压回统一亮度，
+    // 不会在玻璃面板上糊成一片。
+    LIME("lime", "青柠", Color(0xFF9ACD32)),
     AMBER("amber", "琥珀", Color(0xFFDE7A22)),
     ROSE("rose", "绯樱", Color(0xFFD24A79)),
     ;

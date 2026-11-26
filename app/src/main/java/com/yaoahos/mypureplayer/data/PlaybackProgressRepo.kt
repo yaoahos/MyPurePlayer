@@ -2,6 +2,8 @@ package com.yaoahos.mypureplayer.data
 
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -39,6 +41,9 @@ class PlaybackProgressRepo(context: Context) {
     private val rw = Mutex()
 
     private val _marks = MutableStateFlow<List<PlaybackMark>>(emptyList())
+
+    /** 保险箱卡片要显示 / 清除进度后即时刷新，订阅这张表而不是再引入一个 epoch */
+    val marks: StateFlow<List<PlaybackMark>> = _marks.asStateFlow()
 
     /** 是否已从磁盘载入。写操作前必须为 true，否则会把整张表覆盖成一条 */
     @Volatile

@@ -25,7 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
-import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreHoriz
@@ -67,6 +68,7 @@ import com.yaoahos.mypureplayer.data.MediaSource
 import com.yaoahos.mypureplayer.data.SmbClient
 import com.yaoahos.mypureplayer.data.VideoItem
 import com.yaoahos.mypureplayer.playback.Playback
+import com.yaoahos.mypureplayer.ui.FileLocation
 import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.ActionDivider
 import com.yaoahos.mypureplayer.ui.components.ActionRow
@@ -185,7 +187,7 @@ fun HistoryScreen(navController: NavHostController) {
                         }
                         if (history.isNotEmpty()) {
                             IconButton(onClick = { clearConfirm = true }) {
-                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "清空历史")
+                                Icon(Icons.Rounded.DeleteSweep, contentDescription = "清空历史")
                             }
                         }
                     }
@@ -205,8 +207,8 @@ fun HistoryScreen(navController: NavHostController) {
                         SelectionAction(Icons.Rounded.Info, "详情", enabled = canAct && single) {
                                 openInfo(selectedEntries.first())
                         },
-                        // 删除只改历史记录，放前三格；「加入列表」是唯一进「更多」的动作
-                        SelectionAction(Icons.Rounded.DeleteOutline, "删除", enabled = canAct, danger = true) {
+                        // 删除只改历史记录，放前三格；「加入列表」「在文件夹中显示」收进「更多」
+                        SelectionAction(Icons.Rounded.DeleteSweep, "删除", enabled = canAct, danger = true) {
                             pendingDelete = selectedEntries.toList()
                         },
                         SelectionAction(
@@ -215,6 +217,16 @@ fun HistoryScreen(navController: NavHostController) {
                             enabled = canAct,
                         ) {
                             pendingAdd = selectedEntries.map { it.toStub() }
+                        },
+                        // 找文件位置：进「更多」面板。串流地址没有目录，选中它时置灰。
+                        SelectionAction(
+                            Icons.Rounded.FolderOpen,
+                            "在文件夹中显示",
+                            enabled = canAct && single &&
+                                FileLocation.available(selectedEntries.first().toStub()),
+                        ) {
+                            FileLocation.open(navController, selectedEntries.first().toStub())
+                            selection.exit()
                         },
                     ),
                     modifier = Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -294,6 +306,7 @@ fun HistoryScreen(navController: NavHostController) {
             confirmText = "删除",
             destructive = true,
             onConfirm = {
+                com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(entries.map { it.videoId })
                 scope.launchUi { Graph.history.removeByIds(entries.map { it.id }) }
                 pendingDelete = null
                 selection.exit()
@@ -380,12 +393,25 @@ private fun HistoryRow(
             Spacer(Modifier.height(3.dp))
             Text(
                 text = buildString {
-                    append("看到 ${Formats.formatDuration(entry.positionMs)}")
+                    append(Formats.formatDuration(entry.positionMs))
                     if (entry.durationMs > 0) append(" / ${Formats.formatDuration(entry.durationMs)}")
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            val ratio = if (entry.durationMs > 0L && entry.positionMs > 0L) {
+                (entry.positionMs.toFloat() / entry.durationMs).coerceIn(0f, 1f)
+            } else 0f
+            if (ratio > 0f) {
+                Spacer(Modifier.height(4.dp))
+                com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
+                    progress = { ratio },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    // 与播放列表、回收站同一条轨道，玻璃行卡上不换更亮的颜色
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
+                )
+            }
             Text(
                 Formats.formatAgo(entry.updatedAt),
                 style = MaterialTheme.typography.labelSmall,
@@ -418,8 +444,9 @@ private suspend fun HistoryEntry.fullItem(): VideoItem {
     val fresh = when (source) {
         MediaSource.LOCAL -> Graph.local.videos.value.firstOrNull { it.id == videoId }
         MediaSource.SMB -> {
-            // 共享已被移除 / 默认目录改过时不拿历史地址去连，详情就用手头保存的快照
-            val server = Graph.servers.forSmbItem(serverId, uri)
+            // 共享被移除、默认目录改过、或位置被限制到子目录后，都不拿历史地址去连，
+            // 详情就用手头保存的快照（与起播、封面的归属校验一致）
+            val server = Graph.servers.forSmbItemWithin(serverId, uri, folderKey)
             server?.let { srv ->
                 runCatching { SmbClient.toVideoItems(srv, SmbClient.list(srv, folderKey), folderKey) }
                     .getOrNull()?.firstOrNull { it.id == videoId }
@@ -451,11 +478,15 @@ private fun resume(
         val list: List<VideoItem> = when (entry.source) {
             MediaSource.LOCAL -> Graph.local.videosInFolder(entry.folderKey).ifEmpty { listOf(stub) }
             MediaSource.SMB -> {
-                val server = Graph.servers.forSmbItem(entry.serverId, entry.uri)
-                val remote = if (server != null) {
-                    runCatching {
-                        SmbClient.toVideoItems(server, SmbClient.list(server, entry.folderKey), entry.folderKey)
-                    }.getOrDefault(emptyList())
+                // 只用已缓存的同目录列表：cold 连接列目录可能要十几秒，不能堵在跳转前。
+                // 没缓存就单条播放这一集，进播放页后仍可从播放列表里看同目录队列。
+                // 与起播、封面、详情同一条归属校验：网络位置被限制到子目录后，
+                // 目录之外的旧快照不能拿来连、也不该拿它的目录拼播放队列。
+                val server = Graph.servers.forSmbItemWithin(entry.serverId, entry.uri, entry.folderKey)
+                val cached = server?.let { SmbClient.cachedList(it, entry.folderKey) }
+                val remote = if (server != null && cached != null) {
+                    runCatching { SmbClient.toVideoItems(server, cached, entry.folderKey) }
+                        .getOrDefault(emptyList())
                 } else emptyList()
                 remote.ifEmpty { listOf(stub) }
             }

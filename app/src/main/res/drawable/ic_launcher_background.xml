@@ -1,16 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 图标底色（第 14 版）：由「深板岩蓝」换成「中性石墨灰」，并删掉板面细光斑。
-     前几版的问题：底板本身是蓝的，中层圆盘也是蓝的，两者只差明度；再叠加窗反光、
-     右下折射、盘后环境光三层淡光，缩到桌面 48dp 时就成了"一片带斑的蓝灰"——
-     边界和圆盘都读不出来，观感发花。
-     这一版只保留三样东西：
-       ① 中性灰的对角渐变（无彩，与蓝盘彻底分开色相）；
-       ② 整板一片很淡的左上受光（3% 白，只用来交待"面"的朝向）；
-       ③ 四角暗角 + 一圈中性外沿（上左白、右下冷灰，不再掺蓝）。
-     删掉的三层是"发花"的来源：窗反光与折射会在板面上留下椭圆/条状色块，
-     盘后环境光则会在圆盘周围留一圈晕，三者在小尺寸下都读不出材质，只读成脏。
-     外沿描边仍贴视口最外沿（内缩 2.6、宽 2.8、圆角 24），保证任意 launcher 遮罩
-     都能裁出一条贴边亮线。 -->
+<!-- 图标底色（第 27 版）：白色淡蓝板 + 内缘细收口（直边 + 四角弧）。
+
+     第 26 版把板压到 #EBF2FD → #D3E2FA，对纯白壁纸 ΔL* 5.5 / 10，
+     但遇到浅灰蓝壁纸（#E8EDF5，L* 92）只剩 ΔL* 2 —— 板融进壁纸，整枚
+     图标读成「一颗浮着的蓝球」。真机上量过：壁纸 (238,242,254)、板顶
+     (232,240,253)，只差 2.3 L*，边界根本看不出来。
+
+     继续压深是零和：压到能在浅灰蓝上分开，纯白壁纸上又开始糊。明度这
+     条路已经走到头，缺的不是色差，是「轮廓」。
+
+     第 26 版否决过「板沿细线」，那个结论仍然成立：自适应图标只显示
+     18..90，板沿落在遮罩边缘，而遮罩是圆角方还是圆由启动器决定，画矩形
+     边会在圆形遮罩下露出直角。但那只否定了「描在板沿上的线」，没有否定
+     「板内侧的收口」。本版沿可见区内缘向内 1.2 单位铺一条 22% 深蓝、
+     迅速衰减到 0 的渐变带：它不跟随遮罩，也就不存在露角问题。
+
+     收口分两种形状，缺一不可（浅色壁纸上第一次只做直边，四角整段没有
+     压暗，板在角上直接溶进壁纸 —— 真机可见）：
+
+       - 直边：上下左右四条线性渐变带，只覆盖 36..72 的直线段（圆角方
+         可见区 18..90 的直线部分正好是这一段），与弧段在切点处严丝合缝
+       - 四角：四段 1/4 圆环（外半径 18、内半径 16.8，即 1.2 宽），
+         径向渐变以各自的角为圆心，从外沿 22% 衰减到内沿 0 —— 衰减
+         方向与直边带一致，接缝处无色阶跳变
+       - 直边带不要伸进圆角区：伸 2 单位会在环内重叠，接缝处压出暗斑
+       - 圆角半径按 18 取（72 可见区的 25%，Pixel 与小米的启动器都是
+         这一档）。若某个启动器圆角更小，弧段会被裁短、留下一点点多出
+         的压暗，但因为是渐变，看不出硬边
+
+       五档实测（build/preview_rim*.py）：
+         - 3u / 10% 线性     → 读作灰雾，四角最暗，显脏（否）
+         - 2u / 14% 前快后慢 → 仍偏雾（否）
+         - 1.2u / 22%（直边 + 四角弧）→ 读作「一道边」，纯白与浅灰蓝上
+           都分得开，深色壁纸上不显形，48/72dp 下自然变淡、不留脏点
+         - 2u 倒角（外暗内亮）→ 提亮层几乎看不出，信息量不如单层暗边
+
+     颜色取板的同族深蓝 #22355C 而不是中性灰，避免读成「脏」。
+     底板渐变本身不变，立体感仍全部交给圆盘（见 foreground）。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
@@ -18,75 +44,137 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 底层：中性石墨灰对角渐变（无彩，不与中层蓝盘抢色相） -->
+    <!-- 单层：白 → 淡蓝的近垂直渐变，蓝色只在底部。 -->
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:type="linear"
-                android:startX="0"
+                android:startX="54"
                 android:startY="0"
-                android:endX="108"
+                android:endX="54"
                 android:endY="108"
-                android:startColor="#FF3C4249"
-                android:centerColor="#FF2B3036"
-                android:endColor="#FF1C2025" />
+                android:startColor="#FFEBF2FD"
+                android:centerColor="#FFE4EEFC"
+                android:endColor="#FFD3E2FA" />
         </aapt:attr>
     </path>
 
-    <!-- 板面受光：整块板被同一个左上光源照到，向右下渐隐。只给到 3% 白，
-         作用是让"面"有朝向，不给材质信号 —— 再多就回到上一版的斑驳。 -->
-    <path android:pathData="M0,0h108v108h-108z">
+    <!-- 收口 · 上直边：y=18 向内 1.2，x 只覆盖 36..72 的直线段 -->
+    <path android:pathData="M36,18 L72,18 L72,19.2 L36,19.2 Z">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:type="linear"
-                android:startX="8"
-                android:startY="6"
-                android:endX="86"
-                android:endY="94">
-                <item android:offset="0" android:color="#00FFFFFF" />
-                <item android:offset="0.32" android:color="#08FFFFFF" />
-                <item android:offset="0.68" android:color="#00FFFFFF" />
-                <item android:offset="1" android:color="#00FFFFFF" />
+                android:startX="54"
+                android:startY="18"
+                android:endX="54"
+                android:endY="19.2">
+                <item android:offset="0" android:color="#3822355C" />
+                <item android:offset="1" android:color="#0022355C" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- 暗角：四角沉下去，板的体积靠这一层，不再靠板面光斑。 -->
-    <path android:pathData="M0,0h108v108h-108z">
+    <!-- 收口 · 下直边 -->
+    <path android:pathData="M36,88.8 L72,88.8 L72,90 L36,90 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="90"
+                android:endX="54"
+                android:endY="88.8">
+                <item android:offset="0" android:color="#3822355C" />
+                <item android:offset="1" android:color="#0022355C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 收口 · 左直边 -->
+    <path android:pathData="M18,36 L19.2,36 L19.2,72 L18,72 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="18"
+                android:startY="54"
+                android:endX="19.2"
+                android:endY="54">
+                <item android:offset="0" android:color="#3822355C" />
+                <item android:offset="1" android:color="#0022355C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 收口 · 右直边 -->
+    <path android:pathData="M88.8,36 L90,36 L90,72 L88.8,72 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="90"
+                android:startY="54"
+                android:endX="88.8"
+                android:endY="54">
+                <item android:offset="0" android:color="#3822355C" />
+                <item android:offset="1" android:color="#0022355C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 收口 · 左上角弧：圆心 (36,36)，外 r18 → 内 r16.8 -->
+    <path android:pathData="M18,36 A18,18 0 0 1 36,18 L36,19.2 A16.8,16.8 0 0 0 19.2,36 L18,36 Z">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:type="radial"
-                android:centerX="54"
-                android:centerY="54"
-                android:gradientRadius="82">
-                <item android:offset="0" android:color="#00000000" />
-                <item android:offset="0.48" android:color="#00000000" />
-                <item android:offset="0.74" android:color="#1B000000" />
-                <item android:offset="1" android:color="#47000000" />
+                android:centerX="36"
+                android:centerY="36"
+                android:gradientRadius="18">
+                <item android:offset="0" android:color="#0022355C" />
+                <item android:offset="0.933" android:color="#0022355C" />
+                <item android:offset="1" android:color="#3822355C" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- 外沿：一圈中性描边 —— 上左受光最亮，中段几乎为零，右下留一线冷灰。
-         不掺蓝：板上唯一的蓝应该来自中层圆盘，边线上再出现蓝会削弱"灰板 + 蓝盘"
-         的层次。 -->
-    <path
-        android:pathData="M2.6,26.6 A24,24 0 0 1 26.6,2.6 L81.4,2.6 A24,24 0 0 1 105.4,26.6 L105.4,81.4 A24,24 0 0 1 81.4,105.4 L26.6,105.4 A24,24 0 0 1 2.6,81.4 Z"
-        android:strokeWidth="2.8"
-        android:strokeLineCap="round"
-        android:fillColor="#00000000">
-        <aapt:attr name="android:strokeColor">
+    <!-- 收口 · 右上角弧：圆心 (72,36) -->
+    <path android:pathData="M90,36 A18,18 0 0 0 72,18 L72,19.2 A16.8,16.8 0 0 1 88.8,36 L90,36 Z">
+        <aapt:attr name="android:fillColor">
             <gradient
-                android:type="linear"
-                android:startX="16"
-                android:startY="16"
-                android:endX="92"
-                android:endY="92">
-                <item android:offset="0" android:color="#64FFFFFF" />
-                <item android:offset="0.3" android:color="#20FFFFFF" />
-                <item android:offset="0.58" android:color="#09FFFFFF" />
-                <item android:offset="0.8" android:color="#0F8A93A0" />
-                <item android:offset="1" android:color="#268A93A0" />
+                android:type="radial"
+                android:centerX="72"
+                android:centerY="36"
+                android:gradientRadius="18">
+                <item android:offset="0" android:color="#0022355C" />
+                <item android:offset="0.933" android:color="#0022355C" />
+                <item android:offset="1" android:color="#3822355C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 收口 · 右下角弧：圆心 (72,72) -->
+    <path android:pathData="M90,72 A18,18 0 0 1 72,90 L72,88.8 A16.8,16.8 0 0 0 88.8,72 L90,72 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="72"
+                android:centerY="72"
+                android:gradientRadius="18">
+                <item android:offset="0" android:color="#0022355C" />
+                <item android:offset="0.933" android:color="#0022355C" />
+                <item android:offset="1" android:color="#3822355C" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 收口 · 左下角弧：圆心 (36,72) -->
+    <path android:pathData="M18,72 A18,18 0 0 0 36,90 L36,88.8 A16.8,16.8 0 0 1 19.2,72 L18,72 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="36"
+                android:centerY="72"
+                android:gradientRadius="18">
+                <item android:offset="0" android:color="#0022355C" />
+                <item android:offset="0.933" android:color="#0022355C" />
+                <item android:offset="1" android:color="#3822355C" />
             </gradient>
         </aapt:attr>
     </path>

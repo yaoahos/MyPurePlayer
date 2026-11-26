@@ -207,12 +207,29 @@ object Routes {
     const val PLAYLIST_DETAIL = "playlist/{playlistId}"
 
     // targetPlaylist：加入的目标。空串 = 加入「正在播放」队列；否则为该自建列表 id。
-    const val SMB_PATTERN = "smb/{serverId}/{path}?addMode={addMode}&targetPlaylist={targetPlaylist}"
+    // 目录层级统一由返回栈承载：从首页进文件夹、或「在文件夹中显示」跳进深层目录，
+    // 都是每层压一个 smb 目的地；返回逐级 popBackStack，天然按目录树退回，
+    // 不再有 jump 分支 / 页内 AnimatedContent / 手改 zIndex 那套独立动画。
+    const val SMB_PATTERN =
+        "smb/{serverId}/{path}?addMode={addMode}&targetPlaylist={targetPlaylist}&focus={focus}"
+    // 本地文件夹目的地：首页点文件夹、或「在文件夹中显示」跳进来都压这一层，
+    // 返回 pop 回首页（带常驻底栏）。本地目录只有一层，没有继续下钻。
+    const val LOCAL_FOLDER_PATTERN = "localFolder/{folder}?focus={focus}"
     const val PICKER_PATTERN = "picker/{folder}?targetPlaylist={targetPlaylist}"
 
     // addMode=true：从播放列表进入，点视频只加入目标不跳转，用于批量添加
-    fun smb(serverId: Long, path: String, addMode: Boolean = false, targetPlaylist: String = ""): String =
-        "smb/$serverId/${encode(path)}?addMode=$addMode&targetPlaylist=${encode(targetPlaylist)}"
+    fun smb(
+        serverId: Long,
+        path: String,
+        addMode: Boolean = false,
+        targetPlaylist: String = "",
+        focus: String = "",
+    ): String =
+        "smb/$serverId/${encode(path)}?addMode=$addMode&targetPlaylist=${encode(targetPlaylist)}" +
+            "&focus=${encode(focus)}"
+
+    fun localFolder(folderKey: String, focus: String = ""): String =
+        "localFolder/${encode(folderKey)}?focus=${encode(focus)}"
 
     fun picker(folderKey: String, targetPlaylist: String = ""): String =
         "picker/${encode(folderKey)}?targetPlaylist=${encode(targetPlaylist)}"
@@ -666,6 +683,8 @@ fun AppRoot() {
     val overlayHost = remember { AppOverlayHost() }
     val openPlayerSignal by com.yaoahos.mypureplayer.playback.Playback.openPlayerSignal
         .collectAsStateWithLifecycle()
+    val exitPlayerSignal by com.yaoahos.mypureplayer.playback.Playback.exitPlayerSignal
+        .collectAsStateWithLifecycle()
 
     // 当前标签：进内层页面时 route 已经换成内层页面的路由，这里保留最后一个标签，
     // 让壳层在底下继续显示原来那一页。
@@ -749,6 +768,15 @@ fun AppRoot() {
         // 无论是否真的跳转，都先消费掉：信号是“一次性事件”，不是可重放的状态
         com.yaoahos.mypureplayer.playback.Playback.consumeOpenPlayer()
         if (shouldNavigate) navController.navigate(Routes.PLAYER) { launchSingleTop = true }
+    }
+
+    // 播完退出开关：只在播放页还在前台时 pop；后台音频/小窗里也在播放时不能
+    // 把用户当前页面踢走，但信号照样消费，避免下次进播放页被旧值影响。
+    androidx.compose.runtime.LaunchedEffect(exitPlayerSignal) {
+        if (exitPlayerSignal <= 0) return@LaunchedEffect
+        val shouldPop = route == Routes.PLAYER
+        com.yaoahos.mypureplayer.playback.Playback.consumeExitPlayer()
+        if (shouldPop) navController.popBackStack()
     }
 
     // 两层层级（与 MySafePass 同构）：
@@ -870,13 +898,35 @@ private fun AppNavHost() {
                 navArgument("path") { type = NavType.StringType },
                 navArgument("addMode") { type = NavType.BoolType; defaultValue = false },
                 navArgument("targetPlaylist") { type = NavType.StringType; defaultValue = "" },
+                navArgument("focus") { type = NavType.StringType; defaultValue = "" },
             ),
         ) { entry ->
             val serverId = entry.arguments?.getLong("serverId") ?: 0L
             val path = Routes.decode(entry.arguments?.getString("path").orEmpty())
             val addMode = entry.arguments?.getBoolean("addMode") ?: false
             val targetPlaylist = Routes.decode(entry.arguments?.getString("targetPlaylist").orEmpty())
-            PageRoot { SmbBrowserScreen(navController, serverId, path, addMode, targetPlaylist) }
+            val focus = Routes.decode(entry.arguments?.getString("focus").orEmpty())
+            // 目录层级就是返回栈：每进一层压一个 smb 目的地，返回 pop 露出父目录。
+            // 无论是从网络首页正常浏览，还是「在文件夹中显示」跳进深层目录，走的是同一条路，
+            // 因此前进 / 返回动画只有 NavHost 那一套（PageMotion），不再有 jump 特例。
+            PageRoot { SmbBrowserScreen(navController, serverId, path, addMode, targetPlaylist, focus) }
+        }
+
+        // 本地文件夹目的地：首页点文件夹、或「在文件夹中显示」跳进来都压这一层，
+        // 返回 pop 回首页。整页转场与全站一致（PageMotion 的 page 套），
+        // 页内不再有第二套弹簧动画、也没有"退回首页文件夹却没底栏"的中间态。
+        composable(
+            route = Routes.LOCAL_FOLDER_PATTERN,
+            arguments = listOf(
+                navArgument("folder") { type = NavType.StringType },
+                navArgument("focus") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) { entry ->
+            val folder = Routes.decode(entry.arguments?.getString("folder").orEmpty())
+            val focus = Routes.decode(entry.arguments?.getString("focus").orEmpty())
+            PageRoot {
+                LocalScreen(navController, initialFolderKey = folder, focus = focus)
+            }
         }
 
         composable(

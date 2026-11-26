@@ -4,7 +4,6 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -62,24 +61,6 @@ object PageMotion {
     val Easing = FastOutSlowInEasing
 
     /**
-     * 页内（不走页面容器）的位移弹簧：本地视频进 / 出文件夹的 `folderSlide` 在用。
-     *
-     * 这条路径是用户唯一从头到尾认可的手感，参数保持不动。
-     * **不要给它加 visibilityThreshold**：它驱动 0..1 的归一化进度，阈值按"进度"算
-     * 而不是按像素算，写 1f 会等价于"进度差 1 就算完"、整页瞬移。
-     */
-    val PageSpringF = spring<Float>(dampingRatio = 0.92f, stiffness = 500f)
-
-    /**
-     * 播放页淡入淡出用的弹簧。
-     *
-     * 播放画面宿主是 SurfaceView（HDR 唯一可行路径），独立硬件图层不跟随
-     * `translationX`，只能走 alpha。用弹簧而不 tween：转场时长要和其它转场同一量级，
-     * 且弹簧走物理时间，不担心系统动画缩放。
-     */
-    val PageAlphaSpring = spring<Float>(dampingRatio = 0.92f, stiffness = 500f)
-
-    /**
      * 播放页进出改用明确时长的 tween。
      *
      * 之前用弹簧尾巴偏长，画面像"黏"在屏幕上；而且 2026-11-22 慢放包已经证伪了
@@ -88,6 +69,16 @@ object PageMotion {
      */
     val PlayerFadeIn = tween<Float>(durationMillis = 220, easing = Easing)
     val PlayerFadeOut = tween<Float>(durationMillis = 200, easing = Easing)
+
+    /**
+     * 播放页内部控制条（顶栏 / 底栏 / 中央播放键 / 加载圈）的淡入淡出。
+     *
+     * 不能直接用 `fadeIn()` / `fadeOut()` 的默认 spring：它的退出尾巴没有明确终点，
+     * 半透明的控制条会 lingering 在画面上，慢放尤其明显，看起来像"图标残影 / 卡住"。
+     * 用与整页同一条曲线的短 tween，进出都跟手，和整页淡入也不会各走一套节奏。
+     */
+    val PlayerControlFadeIn = tween<Float>(durationMillis = 140, easing = Easing)
+    val PlayerControlFadeOut = tween<Float>(durationMillis = 120, easing = Easing)
 }
 
 /**

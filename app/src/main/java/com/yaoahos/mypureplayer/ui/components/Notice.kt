@@ -90,9 +90,16 @@ object Notice {
     }
 }
 
+/**
+ * 停留时长：够读完一遍就走，不占着顶部。
+ *
+ * 原先按 60ms/字叠加、外加最多 4 秒，长句能停到 6 秒 —— 它盖在标题栏和工具栏上方，
+ * 停留过久会挡住正在看的按钮。中文阅读约 5 字/秒，按 40ms/字给余量即可，
+ * 上限收到 1.2 秒，最长不超过 3.2 秒。错误提示多给 0.6 秒，因为需要看清原因。
+ */
 private fun NoticeTone.durationFor(length: Int): Long {
-    val base = if (this == NoticeTone.ERROR) 3_500L else 2_000L
-    return base + (length * 60L).coerceAtMost(4_000L)
+    val base = if (this == NoticeTone.ERROR) 2_000L else 1_400L
+    return base + (length * 40L).coerceAtMost(1_200L)
 }
 
 /**

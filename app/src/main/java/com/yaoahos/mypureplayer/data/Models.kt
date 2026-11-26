@@ -153,6 +153,8 @@ data class PlayerUiState(
     val queueSize: Int = 0,
     /** 当前队列实际使用的播放顺序；播放页可临时改，不影响设置页的全局值 */
     val playMode: Int = com.yaoahos.mypureplayer.data.PlayModes.SEQUENCE,
+    /** 随机播放本轮还剩几集没播，仅用于播放页「下一个」按钮的可用状态 */
+    val shuffleLeft: Int = 0,
     val scaleMode: Int = 0,
     val subtitlesEnabled: Boolean = true,
     val activeSubtitleId: Int = -1,

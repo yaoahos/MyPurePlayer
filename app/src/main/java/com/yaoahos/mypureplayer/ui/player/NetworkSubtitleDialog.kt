@@ -111,7 +111,11 @@ fun NetworkSubtitlePickerDialog(
             .onSuccess { all ->
                 entries = all.filter { it.isDirectory || Formats.isSubtitle(it.name) }
             }
-            .onFailure { error = SmbErrors.describe(it) }
+            .onFailure {
+                // 翻目录时上一个 LaunchedEffect 会被取消：那不是失败，别把「连接失败」写进错误位
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                error = SmbErrors.describe(it)
+            }
         loading = false
     }
 

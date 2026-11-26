@@ -72,6 +72,7 @@ import com.yaoahos.mypureplayer.ui.components.MediaFolderRow
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.Notice
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
+import com.yaoahos.mypureplayer.ui.components.MediaSortDraft
 import com.yaoahos.mypureplayer.ui.components.SelectionAction
 import com.yaoahos.mypureplayer.ui.components.SelectionActionBar
 import com.yaoahos.mypureplayer.ui.components.SelectionBadge
@@ -106,6 +107,10 @@ fun TrashScreen(navController: NavHostController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val entries by Graph.trash.entries.collectAsStateWithLifecycle()
+    // 「清除播放进度」是否点亮要按选中项里到底有没有进度判断：
+    // 回收站的进度有两处来源 —— 历史记录（卡片进度条读它）与原路径上的进度表（清时会一起删）。
+    val history by Graph.history.history.collectAsStateWithLifecycle()
+    val marks by Graph.progress.marks.collectAsStateWithLifecycle()
 
     var confirmClear by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<List<TrashEntry>?>(null) }
@@ -120,6 +125,15 @@ fun TrashScreen(navController: NavHostController) {
     val selectedEntries = remember(entries, selection.ids) {
         entries.filter { selection.contains(it.id.toString()) }
     }
+    // 文件夹没有播放进度；视频要有进度才允许清（历史里的 trash:<id> 或原路径的进度表）。
+    val hasProgress = remember(selectedEntries, history, marks) {
+        selectedEntries.any { entry ->
+            !entry.isFolder && (
+                history.any { it.videoId == "trash:${entry.id}" && it.positionMs > 0L } ||
+                    marks.any { it.key == entry.originalPath && it.positionMs > 0L }
+                )
+        }
+    }
 
     BackHandler(enabled = selection.active) { selection.exit() }
     BackHandler(enabled = searchOpen) {
@@ -127,13 +141,21 @@ fun TrashScreen(navController: NavHostController) {
         query = ""
     }
 
-    // 排序：与本地页/播放列表同一个面板、同一套用词（排列与排序 → 排序）
-    var sortKey by remember { mutableStateOf(SortKey.DATE) }
-    var ascending by remember { mutableStateOf(false) }
+    // 排列与排序：退出再进来要保住，所以初值取自持久化设置，确定时再写回 DataStore。
+    val appSettings by Graph.settings.settings.collectAsStateWithLifecycle(
+        initialValue = Graph.settings.currentOrNull() ?: com.yaoahos.mypureplayer.data.AppSettings(),
+    )
+    var sortKey by remember { mutableStateOf(runCatching { SortKey.valueOf(appSettings.trashSort) }.getOrDefault(SortKey.DATE)) }
+    var ascending by remember { mutableStateOf(appSettings.trashAscending) }
     var sortSheetOpen by remember { mutableStateOf(false) }
+    var sortDraft by remember { mutableStateOf<MediaSortDraft?>(null) }
     // 宫格 / 列表：与本地页、播放列表共用同一个「排列与排序」面板。
-    // 默认给宫格 —— 本地视频页默认就是宫格，两边打开第一眼是同一个版式。
-    var gridMode by rememberSaveable { mutableStateOf(true) }
+    var gridMode by rememberSaveable { mutableStateOf(appSettings.trashGrid) }
+    LaunchedEffect(appSettings.trashGrid, appSettings.trashSort, appSettings.trashAscending) {
+        gridMode = appSettings.trashGrid
+        sortKey = runCatching { SortKey.valueOf(appSettings.trashSort) }.getOrDefault(SortKey.DATE)
+        ascending = appSettings.trashAscending
+    }
 
     LaunchedEffect(Unit) {
         Graph.trash.load()
@@ -327,7 +349,10 @@ fun TrashScreen(navController: NavHostController) {
                         }
                         if (entries.isNotEmpty()) {
                             // 排序：删掉的是一个文件夹时也要能按名字找回来
-                            IconButton(onClick = { sortSheetOpen = true }) {
+                            IconButton(onClick = {
+                                sortDraft = MediaSortDraft(gridMode, sortKey.name, ascending)
+                                sortSheetOpen = true
+                            }) {
                                 Icon(Icons.Rounded.Tune, contentDescription = "排序")
                             }
                             // 清空是破坏性操作：图标也用错误色，不再和普通动作长一样
@@ -364,6 +389,26 @@ fun TrashScreen(navController: NavHostController) {
                         // 彻底删除不可撤销，收进「更多」
                         SelectionAction(Icons.Rounded.DeleteForever, "彻底删除", enabled = canAct, danger = true) {
                             deleteTarget = selectedEntries.toList()
+                        },
+                        // 回收站里的视频也在播放时留下进度，但不在历史页里，只能在这里清
+                        SelectionAction(
+                            // 不能沿用「删除历史」的 History 图标：本页「恢复」是同类回转箭头，
+                            // 两个图标挨着看不出区别。用扫帚表达"清掉记录、不动文件"。
+                            Icons.Rounded.DeleteSweep,
+                            "清除播放进度",
+                            enabled = hasProgress,
+                        ) {
+                            val videos = selectedEntries.filter { !it.isFolder }
+                            val keys = videos.map { "trash:${it.id}" }
+                            // 正在播的回收站视频仍在队列里，不挡住轮询会立刻写回历史
+                            com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(keys)
+                            scope.launch {
+                                Graph.history.removeAll(keys)
+                                // 恢复时会按原路径把暂存进度写回历史，这里要一起清掉
+                                videos.forEach { Graph.progress.drop(it.originalPath) }
+                            }
+                            Notice.success("已清除 ${videos.size} 个视频的播放进度")
+                            selection.exit()
                         },
                     ),
                     modifier = Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -493,7 +538,16 @@ fun TrashScreen(navController: NavHostController) {
 
     if (sortSheetOpen) {
         SortLayoutSheet(
-            onDismiss = { sortSheetOpen = false },
+            onDismiss = {
+                // 取消回滚到打开面板时的快照；确定时 onApply 已先清空 sortDraft
+                sortDraft?.let { draft ->
+                    gridMode = draft.grid
+                    sortKey = runCatching { SortKey.valueOf(draft.key) }.getOrDefault(SortKey.DATE)
+                    ascending = draft.ascending
+                }
+                sortDraft = null
+                sortSheetOpen = false
+            },
             title = "排列与排序",
             initialGrid = gridMode,
             initialSort = sortKey,
@@ -509,7 +563,9 @@ fun TrashScreen(navController: NavHostController) {
                 gridMode = grid
                 sortKey = key
                 ascending = asc
+                sortDraft = null
                 sortSheetOpen = false
+                scope.launch { Graph.settings.setTrashLayout(grid, key.name, asc) }
             },
         )
     }

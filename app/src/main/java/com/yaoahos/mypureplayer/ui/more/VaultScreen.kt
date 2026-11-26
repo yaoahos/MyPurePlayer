@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
@@ -53,7 +54,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -62,6 +62,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -90,6 +91,8 @@ import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.ActionDivider
 import com.yaoahos.mypureplayer.ui.components.ActionRow
 import com.yaoahos.mypureplayer.ui.components.AdaptiveSheet
+import com.yaoahos.mypureplayer.media.Thumbnails
+import com.yaoahos.mypureplayer.ui.components.BitmapHolder
 import com.yaoahos.mypureplayer.ui.components.EmptyState
 import com.yaoahos.mypureplayer.ui.components.FolderInfoDialog
 import com.yaoahos.mypureplayer.ui.components.InfoRow
@@ -115,6 +118,8 @@ import com.yaoahos.mypureplayer.ui.components.appGlassSurface
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import com.yaoahos.mypureplayer.ui.components.listRowMinSize
 import com.yaoahos.mypureplayer.ui.components.mediaCardOutline
+import com.yaoahos.mypureplayer.ui.components.roundedBitmap
+import com.yaoahos.mypureplayer.ui.components.roundedBrush
 import com.yaoahos.mypureplayer.ui.components.selectionCardOutline
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -138,6 +143,9 @@ fun VaultScreen(navController: NavHostController) {
     val entries by Graph.vault.entries.collectAsStateWithLifecycle()
     val config by Graph.vault.config.collectAsStateWithLifecycle()
     val unlocked by Graph.vault.unlocked.collectAsStateWithLifecycle()
+    // 保险箱进度单独存在 playback_marks.json（vault:<id>），历史页管不到；
+    // 「清除播放进度」按选中有没有进度点亮，没进度时置灰，避免点了像没反应。
+    val marks by Graph.progress.marks.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val activity = remember(context) { context.findFragmentActivity() }
@@ -148,14 +156,22 @@ fun VaultScreen(navController: NavHostController) {
     var setupWasEnabled by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
 
+    val appSettings by Graph.settings.settings.collectAsStateWithLifecycle(
+        initialValue = Graph.settings.currentOrNull() ?: com.yaoahos.mypureplayer.data.AppSettings(),
+    )
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    var gridMode by rememberSaveable { mutableStateOf(true) }
-    var sortName by rememberSaveable { mutableStateOf(SortKey.DATE.name) }
-    var ascending by rememberSaveable { mutableStateOf(false) }
+    var gridMode by rememberSaveable { mutableStateOf(appSettings.vaultGrid) }
+    var sortName by rememberSaveable { mutableStateOf(appSettings.vaultSort) }
+    var ascending by rememberSaveable { mutableStateOf(appSettings.vaultAscending) }
     var sortSheetOpen by remember { mutableStateOf(false) }
     var sortDraft by remember { mutableStateOf<MediaSortDraft?>(null) }
     var currentFolder by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(appSettings.vaultGrid, appSettings.vaultSort, appSettings.vaultAscending) {
+        gridMode = appSettings.vaultGrid
+        sortName = appSettings.vaultSort
+        ascending = appSettings.vaultAscending
+    }
 
     // 长按 = 选中 + 弹面板；视频 / 文件夹各有一张面板，关掉面板后点按其它条目继续加选。
     val selection = remember { ListSelection() }
@@ -237,6 +253,12 @@ fun VaultScreen(navController: NavHostController) {
         folders.filter { selection.contains("d:${it.key}") }
     }
     val selectedCount = selectedEntries.size + selectedFolders.size
+    val hasProgress = remember(selectedEntries, marks) {
+        val keys = selectedEntries.mapTo(HashSet()) {
+            com.yaoahos.mypureplayer.data.PlaybackProgressRepo.vaultKey(it.id)
+        }
+        marks.any { it.key in keys && it.positionMs > 0L }
+    }
 
     // 注意：这里不能再根据「选中数归零」自动退出选择态。
     // 取消全选后 selectedCount == 0 是合法状态，顶栏应保持「已选择 0 项」+ X。
@@ -578,6 +600,22 @@ fun VaultScreen(navController: NavHostController) {
                         SelectionAction(Icons.Rounded.Restore, "移出", enabled = canAct) { requestRestore() },
                         SelectionAction(Icons.Rounded.DeleteForever, "彻底删除", enabled = canAct, danger = true) {
                             requestDelete()
+                        },
+                        // 进度在独立的 playback_marks.json，历史页管不到，只能在这里清
+                        SelectionAction(
+                            // 与「移出」的 Restore 图标区分开：扫帚只清记录、不动视频
+                            Icons.Rounded.DeleteSweep,
+                            "清除播放进度",
+                            enabled = hasProgress,
+                        ) {
+                            val keys = selectedEntries.map {
+                                com.yaoahos.mypureplayer.data.PlaybackProgressRepo.vaultKey(it.id)
+                            }
+                            // 保险箱进度由播放轮询写独立表；不挡住就会清完又冒出来
+                            com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(keys)
+                            scope.launch { Graph.progress.dropAll(keys) }
+                            Notice.success("已清除 ${keys.size} 个视频的播放进度")
+                            selection.exit()
                         },
                     ),
                     modifier = Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -1151,7 +1189,7 @@ fun VaultScreen(navController: NavHostController) {
                         )
                         Spacer(Modifier.height(12.dp))
                     }
-                    LinearProgressIndicator(
+                    com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
                         progress = { progressValue },
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -1170,7 +1208,12 @@ fun VaultScreen(navController: NavHostController) {
     if (sortSheetOpen) {
         SortLayoutSheet(
             onDismiss = {
-                // onPreview 已实时应用选择；不能再用打开面板时的旧快照覆盖
+                // 取消回滚到打开面板时的快照；确定时 onApply 已先清空 sortDraft
+                sortDraft?.let { draft ->
+                    gridMode = draft.grid
+                    sortName = draft.key
+                    ascending = draft.ascending
+                }
                 sortDraft = null
                 sortSheetOpen = false
             },
@@ -1188,6 +1231,7 @@ fun VaultScreen(navController: NavHostController) {
                 sortName = key.name
                 ascending = asc
                 sortDraft = null
+                scope.launch { Graph.settings.setVaultLayout(grid, key.name, asc) }
             },
         )
     }
@@ -1238,6 +1282,20 @@ private fun parentFolderKey(current: String, folders: List<VaultFolder>): String
  * 尺寸、间距、标题行高都与 [com.yaoahos.mypureplayer.ui.components.VideoGridCard] 一致，
  * 只是缩略图位置换成"加密锁牌"：这里没有可截的帧，也不能为了预览去解密。
  */
+/** 保险箱进度条：进度存在 playback_marks.json（vault:<id>），不在历史里 */
+@Composable
+private fun vaultProgressRatio(entry: VaultEntry): Float {
+    val marks by Graph.progress.marks.collectAsStateWithLifecycle()
+    val mark = marks.firstOrNull {
+        it.key == com.yaoahos.mypureplayer.data.PlaybackProgressRepo.vaultKey(entry.id)
+    }
+    val position = mark?.positionMs ?: 0L
+    val total = mark?.durationMs?.takeIf { it > 0L } ?: entry.durationMs
+    return if (total > 0L && position > 0L) {
+        (position.toFloat() / total).coerceIn(0f, 1f)
+    } else 0f
+}
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun VaultGridCard(
@@ -1267,7 +1325,7 @@ private fun VaultGridCard(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
-                VaultArtwork(iconSize = 34.dp)
+                VaultArtwork(entry = entry, iconSize = 34.dp)
                 SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
             }
             Column(
@@ -1295,6 +1353,16 @@ private fun VaultGridCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                val ratio = vaultProgressRatio(entry)
+                if (ratio > 0f) {
+                    Spacer(Modifier.height(3.dp))
+                    com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
+                        progress = { ratio },
+                        modifier = Modifier.fillMaxWidth(0.86f).height(3.dp),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
+                    )
+                }
             }
         }
     }
@@ -1329,7 +1397,7 @@ private fun VaultListRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(width = 132.dp, height = 76.dp)) {
-            VaultArtwork(iconSize = 26.dp, radius = 14.dp)
+            VaultArtwork(entry = entry, iconSize = 26.dp, radius = 14.dp)
             SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(4.dp))
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -1347,23 +1415,48 @@ private fun VaultListRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            val ratio = vaultProgressRatio(entry)
+            if (ratio > 0f) {
+                Spacer(Modifier.height(3.dp))
+                com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
+                    progress = { ratio },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
+                )
+            }
         }
     }
 }
 
-/** 加密内容的占位牌：一层同族薄纱 + 锁图标，随卡片尺寸缩放 */
+/** 加密内容的占位牌：有随条目带进来的缩略图就铺满，否则退回同族薄纱 + 锁图标 */
 @Composable
-private fun VaultArtwork(iconSize: androidx.compose.ui.unit.Dp, radius: androidx.compose.ui.unit.Dp = 0.dp) {
+private fun VaultArtwork(
+    entry: VaultEntry,
+    iconSize: androidx.compose.ui.unit.Dp,
+    radius: androidx.compose.ui.unit.Dp = 0.dp,
+) {
+    val context = LocalContext.current
+    // 以密文名为 key：条目在保险箱里不会变；移出时这张图也会跟着搬回本地路径
+    val thumb by produceState<BitmapHolder?>(initialValue = null, entry.storedName) {
+        value = Thumbnails.vaultThumb(context, entry.storedName)?.let { BitmapHolder(it) }
+    }
+    val holder = thumb
+    if (holder != null) {
+        // 与本地/SMB 缩略图同一条路：位图当 Shader 铺进圆角，不建离屏图层
+        Box(Modifier.fillMaxSize().roundedBitmap(holder.bitmap, radius))
+        return
+    }
     val glass = appGlass()
+    val brush = remember(glass.tintSoft) {
+        Brush.verticalGradient(
+            listOf(glass.tintSoft.copy(alpha = 0.20f), glass.tintSoft.copy(alpha = 0.06f)),
+        )
+    }
     Box(
         Modifier
             .fillMaxSize()
-            .clip(RoundedCornerShape(radius))
-            .background(
-                Brush.verticalGradient(
-                    listOf(glass.tintSoft.copy(alpha = 0.20f), glass.tintSoft.copy(alpha = 0.06f)),
-                ),
-            ),
+            .roundedBrush(brush, radius),
         contentAlignment = Alignment.Center,
     ) {
         Icon(

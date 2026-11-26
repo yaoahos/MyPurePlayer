@@ -45,6 +45,7 @@ import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -143,6 +144,78 @@ fun NetworkScreen(navController: NavHostController) {
     var sortDraft by remember { mutableStateOf<MediaSortDraft?>(null) }
     var refreshing by remember { mutableStateOf(false) }
 
+    // 共享卡片防连点：flashClick 的延迟反馈不拦截重复点击，快速连点同一张卡片会
+    // 连续 navigate 同一个 smb 目的地，压出一叠相同页面（表现为"重复进入同一个文件夹"）。
+    // 这里在导航层加闸门，600ms 大于转场时长、短于用户再次主动点击的间隔。
+    var navigationPending by remember { mutableStateOf(false) }
+    LaunchedEffect(navigationPending) {
+        if (navigationPending) {
+            kotlinx.coroutines.delay(600)
+            navigationPending = false
+        }
+    }
+    // 正在预检连接的共享：同时充当第二次防连点（预检可能跑十几秒）
+    var connecting by remember { mutableStateOf<SmbServer?>(null) }
+    // 转圈再延迟一点出现：局域网里预检常常一两百毫秒就完成，圈刚画出来人就跳进去了，
+    // 看起来像闪了一下。超过阈值还没进才显示，快到看不见的情况干脆不画。
+    var ringVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(connecting) {
+        ringVisible = false
+        if (connecting == null) return@LaunchedEffect
+        kotlinx.coroutines.delay(CONNECTING_RING_DELAY_MS)
+        ringVisible = true
+    }
+
+    /**
+     * 打开共享前先确认「它现在真的能打开」。
+     *
+     * 旧实现直接 navigate：NAS 关机、换了网络、密码被改了的时候，用户会先看到一个
+     * 完整的空页面，页面中间再竖一条红色错误——那看起来像应用自己坏了，而且还得手动返回。
+     * 现在把这一次失败留在列表页，用顶部提示条说明原因。
+     *
+     * 预检本身就是列根目录，结果进 SmbClient 的目录缓存，真正进入时能直接出列表，
+     * 不会多花一次网络往返。
+     */
+    fun openServer(server: SmbServer) {
+        if (navigationPending || connecting != null) return
+        navigationPending = true
+        // 有缓存（5 分钟内进过）就直接进：旧列表能看，不该被强制预检挡在门外。
+        if (SmbClient.cachedList(server, server.rootPath) != null) {
+            navController.navigate(Routes.smb(server.id, server.rootPath))
+            return
+        }
+        connecting = server
+        scope.launchUi {
+            // 超时按「最坏冷连接」给：SMB 握手 20s + 认证 + 列一次目录。
+            // 比共享页面里的 70s 短，是因为这里没有任何内容可看，等太久只会让人以为卡死。
+            val probe = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(CONNECT_PROBE_TIMEOUT_MS) {
+                    SmbClient.list(server, server.rootPath)
+                }
+            }
+                // 取消不是失败：切标签 / 离开网络页时协程被取消，runCatching 会把它当成
+                // 一次异常，接着就在别的页面上弹「连接失败」。这里原样抛出。
+                .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+            connecting = null
+            when {
+                probe.isFailure -> {
+                    navigationPending = false
+                    Notice.error("「${server.name}」${SmbErrors.headline(server, probe.exceptionOrNull()!!)}")
+                }
+                probe.getOrNull() == null -> {
+                    navigationPending = false
+                    Notice.error("「${server.name}」连接超时")
+                }
+                else -> {
+                    // 预检可能跑了几秒，原来的 600ms 闸门早已复位；这里重新举起，
+                    // 挡住转场期间的连点（否则会压出两层相同的页面）。
+                    navigationPending = true
+                    navController.navigate(Routes.smb(server.id, server.rootPath))
+                }
+            }
+        }
+    }
+
     suspend fun reload() {
         refreshing = true
         Graph.servers.load()
@@ -231,7 +304,7 @@ fun NetworkScreen(navController: NavHostController) {
                 SelectionActionBar(
                     actions = listOf(
                         SelectionAction(Icons.Rounded.Cloud, "打开", enabled = canAct && soloServer != null) {
-                            soloServer?.let { navController.navigate(Routes.smb(it.id, it.rootPath)) }
+                            soloServer?.let { openServer(it) }
                             selection.exit()
                         },
                         SelectionAction(Icons.Rounded.NetworkCheck, "测试", enabled = canAct && soloServer != null) {
@@ -306,11 +379,12 @@ fun NetworkScreen(navController: NavHostController) {
                             server = server,
                             onClick = {
                                 if (selection.active) selection.toggle(server.id.toString())
-                                else flashClick { navController.navigate(Routes.smb(server.id, server.rootPath)) }
+                                else flashClick { openServer(server) }
                             },
                             onLongClick = { selection.enter(server.id.toString()) },
                             selected = selection.contains(server.id.toString()),
                             selecting = selection.active,
+                            connecting = ringVisible && connecting?.id == server.id,
                         )
                     }
                 }
@@ -325,11 +399,12 @@ fun NetworkScreen(navController: NavHostController) {
                             server = server,
                             onClick = {
                                 if (selection.active) selection.toggle(server.id.toString())
-                                else flashClick { navController.navigate(Routes.smb(server.id, server.rootPath)) }
+                                else flashClick { openServer(server) }
                             },
                             onLongClick = { selection.enter(server.id.toString()) },
                             selected = selection.contains(server.id.toString()),
                             selecting = selection.active,
+                            connecting = ringVisible && connecting?.id == server.id,
                         )
                     }
                 }
@@ -418,7 +493,8 @@ fun NetworkScreen(navController: NavHostController) {
             val result = SmbClient.test(server)
             result.fold(
                 onSuccess = { Notice.success("连接成功") },
-                onFailure = { Notice.error(SmbErrors.describe(it)) },
+                // 顶部只放一句结论；要看「为什么」就去编辑面板里点「测试连接」，那里有整句
+                onFailure = { Notice.error("「${server.name}」${SmbErrors.headline(server, it)}") },
             )
             testing = null
         }
@@ -445,6 +521,7 @@ private fun ServerCard(
     onLongClick: () -> Unit,
     selected: Boolean = false,
     selecting: Boolean = false,
+    connecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectPressedWithTap()
@@ -488,6 +565,13 @@ private fun ServerCard(
                         selected, Modifier.align(Alignment.TopEnd).padding(2.dp),
                     )
                 }
+                // 预检连接期间在图标右上角转圈：点完立刻有反馈，不用猜「是不是没点上」
+                if (connecting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(14.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
             }
             Column(
                 Modifier
@@ -526,6 +610,7 @@ private fun ServerGridCard(
     onLongClick: () -> Unit,
     selected: Boolean = false,
     selecting: Boolean = false,
+    connecting: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectPressedWithTap()
@@ -566,6 +651,12 @@ private fun ServerGridCard(
                 if (selecting) {
                     SelectionBadge(
                         selected, Modifier.align(Alignment.TopEnd).padding(6.dp),
+                    )
+                }
+                if (connecting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(14.dp),
+                        strokeWidth = 2.dp,
                     )
                 }
             }
@@ -813,3 +904,20 @@ private fun OutlinedInput(
         modifier = Modifier.fillMaxWidth(),
     )
 }
+
+/**
+ * 点击共享卡片时预检连接的等待上限。
+ *
+ * 冷连接（NAS 刚从休眠醒来）握手 20s + 认证 + 列一次目录，再长就只能归到「进不去」。
+ * 共享页里给 70s 是因为那边有缓存列表可看、可以慢慢等；这里点击后什么都还没发生，
+ * 空等一分多钟只会让人以为卡死，不如早一点把原因写在顶部。
+ */
+private const val CONNECT_PROBE_TIMEOUT_MS = 40_000L
+
+/**
+ * 预检转圈延迟出现的阈值。
+ *
+ * 局域网里预检常常一两百毫秒就完成，圈刚画出来人已经进页面了，看起来像闪了一下。
+ * 350ms 小于人的「这算不算有反应」等待感（约半秒），又足够盖住快速预检。
+ */
+private const val CONNECTING_RING_DELAY_MS = 350L

@@ -6,6 +6,7 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.PixelCopy
@@ -112,13 +113,18 @@ object Playback {
      */
     private const val BUFFERING_UI_DELAY_MS = 400L
 
+    /**
+     * 续播提示的起点门槛：40 秒以内不提示。
+     *
+     * 用户看两秒就退出去的情形很常见（点错了、跳着找片），每次都弹一条「从 00:02 继续」
+     * 就成了噪音。一分钟上下是「确实看过一段」的自然分界，也不至于漏掉真正想接着看的。
+     */
+    private const val RESUME_HINT_MIN_MS = 40_000L
+
     /** 首帧上屏后等这么久再截缩略图：跳过片头黑场、台标与开场字幕 */
     private const val THUMB_CAPTURE_DELAY_MS = 2_500L
     /** 截到黑场（夜景/淡入）时补截一次的间隔 */
     private const val THUMB_RETRY_DELAY_MS = 6_000L
-
-    /** 起播前等服务器回音的时长；超过就当「不知道」，让播放页照常去连 */
-    private const val SMB_PROBE_WAIT_MS = 2_000L
 
     private lateinit var app: Context
     private var player: ExoPlayer? = null
@@ -148,6 +154,15 @@ object Playback {
     private var firstFrameShown = false
     /** 本次起播的代号：首帧/READY 回调回来时核对，避免上一集的迟到回调误关本次转圈 */
     private var startSeq = 0
+    /** 本次起播的起始时刻（elapsedRealtime），只用于首帧耗时日志 */
+    private var startElapsedRealtime = 0L
+
+    /**
+     * 本次起播要提示的续播位置（0 表示不提示）。
+     *
+     * 只在首帧渲染后消费：起播失败时用户看到的应该是错误，而不是「从 12:34 继续播放」。
+     */
+    private var pendingResumeHintMs = 0L
 
     /** 进入画中画后 Activity 仍在前台，不能按「离开播放页」处理 */
     @Volatile
@@ -193,6 +208,18 @@ object Playback {
             CoroutineExceptionHandler { _, t -> Log.e(TAG, "播放器后台任务异常", t) },
     )
 
+    /**
+     * 用户清掉进度后，正在播的那一条仍留在队列里，30 秒轮询会把记录原样写回来。
+     * 这里记下被清掉的 id，起播同一条时再放行 —— 清完立刻消失，重新点开才会继续记。
+     * 历史页 / 本地 / 播放列表 / 回收站 / 保险箱的清除入口都走这里。
+     */
+    private val clearedProgressIds = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** 清除进度时调用：抑制当前会话对这几条的任何回写，直到用户再次起播 */
+    fun suppressProgressRewrite(ids: Collection<String>) {
+        if (ids.isNotEmpty()) clearedProgressIds.addAll(ids)
+    }
+
     private var serverRepo: ServerRepo? = null
     private var historyRepo: HistoryRepo? = null
     private var localRepo: LocalVideoRepo? = null
@@ -223,6 +250,19 @@ object Playback {
         if (_openPlayerSignal.value != 0) _openPlayerSignal.value = 0
     }
 
+    /** 递增计数：播完且用户开了「播完退出播放界面」时，让导航层返回上一页 */
+    private val _exitPlayerSignal = MutableStateFlow(0)
+    val exitPlayerSignal: StateFlow<Int> = _exitPlayerSignal.asStateFlow()
+
+    private fun requestExitPlayer() {
+        _exitPlayerSignal.value += 1
+    }
+
+    /** 与打开信号一样是一次性事件；不在播放页时也要消费掉，避免下次进页被旧信号踢走 */
+    fun consumeExitPlayer() {
+        if (_exitPlayerSignal.value != 0) _exitPlayerSignal.value = 0
+    }
+
     private val _state = MutableStateFlow(PlayerUiState())
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
@@ -233,12 +273,40 @@ object Playback {
      */
     private var sessionPlayMode: Int? = null
 
+    /**
+     * 随机播放本轮还没播过的队列下标。
+     *
+     * 以前每播完一集就从「除当前以外的全部下标」里抽一个，短队列里很快就会出现
+     * 同一集连着播两遍、播过的又抽回来。现在改成洗牌袋：一轮里每集恰好播一次，
+     * 袋空即整轮结束并停在最后一帧。队列结构变化（换列表、增删、重排）会让下标
+     * 失效，必须重置本轮；当前正在播的那一集已经算播过，不进袋。
+     */
+    private val shufflePool = mutableListOf<Int>()
+
+    /** 重置随机播放的一轮：所有下标打乱，当前集视为已播。 */
+    private fun resetShuffleRound() {
+        shufflePool.clear()
+        shufflePool.addAll(_queue.value.indices)
+        shufflePool.shuffle(kotlin.random.Random)
+        shufflePool.remove(_state.value.queueIndex)
+        _state.update { it.copy(shuffleLeft = shufflePool.size) }
+    }
+
+    /** 从本轮未播集合里取下一集；返回 null 表示这一轮已经播完。 */
+    private fun nextShuffleIndex(): Int? {
+        if (shufflePool.isEmpty()) return null
+        val picked = shufflePool.removeAt(kotlin.random.Random.nextInt(shufflePool.size))
+        _state.update { it.copy(shuffleLeft = shufflePool.size) }
+        return picked
+    }
+
     private fun effectivePlayMode(): Int = sessionPlayMode ?: settings.playMode
 
     /** 播放页 / 播放列表面板里的「仅当前列表」播放顺序。 */
     fun setSessionPlayMode(mode: Int) {
         sessionPlayMode = mode
         _state.update { it.copy(playMode = mode) }
+        if (mode == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         Notice.success("已设为${com.yaoahos.mypureplayer.data.PlayModes.label(mode)}（仅当前列表）")
     }
 
@@ -306,8 +374,15 @@ object Playback {
 
         scope.launch {
             settingsRepo.settings.collect {
+                val previousMode = settings.playMode
                 settings = it
-                if (sessionPlayMode == null) _state.update { s -> s.copy(playMode = it.playMode) }
+                if (sessionPlayMode == null) {
+                    _state.update { s -> s.copy(playMode = it.playMode) }
+                    // 全局顺序切到随机时也要开新的一轮；其余设置变化不能打断正在进行的随机轮次
+                    if (it.playMode == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE &&
+                        previousMode != com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE
+                    ) resetShuffleRound()
+                }
             }
         }
         scope.launch {
@@ -635,7 +710,10 @@ object Playback {
         val index = startIndex.coerceIn(0, items.lastIndex)
         val target = items[index]
         scope.launch {
-            val missing = missingReason(target)
+            // 跳转前只做「不用等网络」的检查：本地看文件在不在，SMB 看配置还覆盖不覆盖。
+            // 以前 SMB 会先 probe（冷连接最坏 20s，这里只等 2s 也要白等 2s），
+            // 用户感觉就是「点历史没反应 / 超时」；真正打不开由播放页的错误态接管。
+            val missing = missingReasonForNavigation(target)
             if (missing != null) {
                 Notice.error(missing)
                 return@launch
@@ -647,17 +725,19 @@ object Playback {
     }
 
     /**
-     * 这条视频现在还能不能播；能播返回 null，否则返回一句给用户看的短提示。
+     * 跳转播放页之前能做的存在性检查：只做不用等网络的那一半。
      *
-     * 本地文件直接看能不能读；网络条目先看当前配置是否仍覆盖这个位置（不需要联网），
-     * 再问一次服务器文件还在不在。
+     * 本地看文件是否可读；SMB 只看当前配置是否还覆盖这个 host/share（纯内存）。
+     * 文件在服务器上是否还在，交给播放页的 Media3 错误态判断 —— 以前在这里 probe，
+     * NAS 冷启动首次建连要十几秒，即使只等 2 秒也会让用户觉得「点历史没反应」。
      */
-    private suspend fun missingReason(item: VideoItem): String? = when (item.source) {
+    private suspend fun missingReasonForNavigation(item: VideoItem): String? = when (item.source) {
         MediaSource.LOCAL -> withContext(Dispatchers.IO) {
             if (localItemExists(item)) null else "视频文件不存在"
         }
 
-        MediaSource.SMB -> smbMissingReason(item)
+        MediaSource.SMB ->
+            if (serverFor(item) == null) "网络位置已移除" else null
 
         MediaSource.STREAM -> null
     }
@@ -674,17 +754,6 @@ object Playback {
             "file" -> File(uri.path.orEmpty()).canRead()
             else -> false
         }
-    }
-
-    private suspend fun smbMissingReason(item: VideoItem): String? {
-        // 共享目录已经从网络位置里删掉 / 改成别的目录：不必联网，直接判定不存在
-        val server = serverRepo?.forSmbItem(item.serverId, item.uri) ?: return "网络位置已移除"
-        // 探测放到后台并只等一小会儿：NAS 休眠时连 TCP 都要 20 秒，
-        // 不能让用户点完以后界面毫无反应，超时就当「不知道」，交给播放页去试。
-        val probe = scope.async(Dispatchers.IO) { runCatching { SmbClient.probe(server, item.uri) } }
-        val result = withTimeoutOrNull(SMB_PROBE_WAIT_MS) { probe.await() } ?: return null
-        val cause = result.exceptionOrNull() ?: return null
-        return if (SmbErrors.isNotFound(cause)) "视频文件不存在" else null
     }
 
     /** 读取观看历史里的续播点；看到结尾（剩不到 5 秒）就当已看完，下次从头播。 */
@@ -715,6 +784,7 @@ object Playback {
         // "Key ... was already used" 把播放页带走，而且队列会落盘、重启后照样崩。
         // 正常入口（addToQueue）已经保证唯一，这里防的是外部数据（备份恢复、旧 json）。
         _queue.value = if (items.size <= 1) items else items.distinctBy { it.id }
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         persistQueue()
     }
 
@@ -724,6 +794,7 @@ object Playback {
         val merged = _queue.value + items.filterNot { it.id in existing }
         _queue.value = merged
         _state.update { it.copy(queueSize = merged.size) }
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         persistQueue()
     }
 
@@ -735,10 +806,12 @@ object Playback {
         if (next.isEmpty()) {
             stopInternal()
             _queue.value = emptyList()
+            if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
             persistQueue()
             return
         }
         _queue.value = next
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         persistQueue()
         when {
             index < playingIndex -> _state.update { it.copy(queueIndex = playingIndex - 1, queueSize = next.size) }
@@ -752,6 +825,7 @@ object Playback {
         _queue.value = emptyList()
         sessionPlayMode = null
         _state.value = PlayerUiState(playMode = effectivePlayMode())
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         persistQueue()
     }
 
@@ -791,10 +865,12 @@ object Playback {
             // 当前项也一起摘掉：它指向的文件已经没了，留着会让媒体通知/播放页
             // 显示一条播不了的条目
             _state.update { it.copy(item = null, queueIndex = -1, queueSize = 0) }
+            if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
             persistQueue()
             return
         }
         _queue.value = kept
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         persistQueue()
         when {
             playingIndex < 0 -> _state.update { it.copy(queueSize = kept.size) }
@@ -845,13 +921,20 @@ object Playback {
         _state.update {
             it.copy(queueIndex = if (index >= 0) index else it.queueIndex, queueSize = items.size)
         }
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         persistQueue()
     }
 
     fun next() {
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) {
+            val picked = nextShuffleIndex()
+            // 一轮已经播完 / 队列只剩当前这一集：停在最后一帧，而不是释放媒体退回黑屏
+            if (picked != null) requestStart(picked, 0L) else finishQueue()
+            return
+        }
         val index = _state.value.queueIndex
         if (index >= 0 && index < _queue.value.lastIndex) requestStart(index + 1)
-        else stopInternal()
+        else finishQueue()
     }
 
     fun previous() {
@@ -879,6 +962,12 @@ object Playback {
         val items = _queue.value
         if (index !in items.indices) return
         val target = items[index]
+        // 随机轮次里，真正开始播的这一集也算「已播」，不再被抽到
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE &&
+            shufflePool.remove(index)
+        ) _state.update { it.copy(shuffleLeft = shufflePool.size) }
+        // 再次起播即恢复记录：清进度不是「永久不再记」，只是把这一轮残留写回挡住。
+        clearedProgressIds.remove(target.id)
         if (_state.value.item?.id != target.id) {
             // 投屏时电视还在播上一集；换片若不先断开，就会「电视播旧的、手机播新的」。
             // 这里先退回本机播放，新的一集要再投需要用户主动选设备。
@@ -916,6 +1005,9 @@ object Playback {
 
         // 播放网络视频时先让封面抽帧停手：两者共用一条 SMB 通道，
         // 边播边抽会让首帧、快进都排在几十张封面后面（就是「打开慢、快进要等」）。
+        //
+        // 注意这只是「起播这一刻」的判断，之后由 [syncThumbAccess] 跟着真实播放状态
+        // 反复校正：只在真的吃带宽时暂停，一旦暂停/播完/停止就恢复。
         if (item.source == MediaSource.SMB) Thumbnails.pauseRemoteThumbs()
         else Thumbnails.resumeRemoteThumbs()
         // 低延迟 Wi-Fi：SMB 的打开/查询都是往返，读吞吐也受往返延迟约束，
@@ -988,9 +1080,17 @@ object Playback {
         }
         thumbCaptured = false
         pendingSeekMs = startMs
+        // 续播提示只在「用户主动点开一条之前看过的视频」时给：
+        // soft 是换字幕重开，sameItem 是同集失败重试，两者都不该再提示一次；
+        // 自动下一集与「从头播放」传的是 0，天然落在门槛之下。
+        pendingResumeHintMs =
+            if (!soft && !sameItem && startMs >= RESUME_HINT_MIN_MS) startMs else 0L
         // 新一轮起播：首帧尚未渲染，递增代号让上一集的迟到回调失效
         startSeq++
         firstFrameShown = false
+        // 起播计时：首帧回调里打一条耗时，用来分辨「第一次打开慢」到底是建连、
+        // 读 moov 还是抽帧抢带宽（logcat 过滤 tag=Playback，关键字 首帧）
+        startElapsedRealtime = SystemClock.elapsedRealtime()
 
         // 设置媒体并定位到起点
         if (startMs > 0L) p.setMediaItem(mediaItem, startMs) else p.setMediaItem(mediaItem)
@@ -1029,11 +1129,22 @@ object Playback {
     /**
      * 这条条目现在还能用哪台服务器。
      *
-     * 判断规则统一放在 [com.yaoahos.mypureplayer.data.ServerRepo.forSmbItem]：
-     * 只有当前配置仍然覆盖这个位置（host 与共享名）才返回，否则一律当作文件不存在。
+     * 先按 host/share 找到服务器，再确认条目所在目录仍在服务器当前配置的根路径内。
+     * 历史 / 播放列表存的是加入时的快照：把网络位置限制到某个子目录（如 Link）后，
+     * 旧条目还指向目录之外，只按 host/share 匹配会照旧地址连到配置外——必须按
+     * 「网络位置已移除」处理，和「在文件夹中显示」的校验保持一致。
      */
     private fun serverFor(item: VideoItem): SmbServer? =
-        if (item.source == MediaSource.SMB) serverRepo?.forSmbItem(item.serverId, item.uri) else null
+        if (item.source == MediaSource.SMB)
+            serverRepo?.forSmbItemWithin(item.serverId, item.uri, item.folderKey)
+        else null
+
+    /** 与 [buildMediaItem] / SmbExoDataSource.open 一致的句柄池 key，用于驱逐坏句柄 */
+    private fun playbackKeyOf(item: VideoItem): String? {
+        val server = serverFor(item) ?: return null
+        val fullUrl = SmbClient.playableUrl(server, item)
+        return SmbClient.nativeUrl(SmbClient.playableUrlWithoutCredentials(fullUrl))
+    }
 
     private fun buildMediaItem(item: VideoItem, server: SmbServer?): MediaItem? {
         return try {
@@ -1255,6 +1366,34 @@ object Playback {
     }
 
     /**
+     * 封面抽帧让路：只在「网络视频真的在吃带宽」时暂停，其余时刻一律恢复。
+     *
+     * 为什么需要单独校正：标记原本只在起播时置位，而复位点只有 [stopInternal] /
+     * [stopAndDismiss] / SMB 浏览页。用户看片中途暂停、按返回、切到历史记录 /
+     * 播放列表 / 回收站，都不会走那三条路径，标记就一直是 true —— 只要播过一次
+     * 网络视频，之后整个应用里的网络封面再也不会生成（真机实测：暂停态下历史记录
+     * 5 条里 4 条网络视频全停在占位图标，日志是「播放中，暂缓网络抽帧」）。
+     *
+     * 「占带宽」= 缓冲中，或 READY 且正在播。暂停 / 播完 / 空闲都不占，此时抽帧
+     * 不和播放器抢通道，没有理由继续让路。
+     */
+    private fun syncThumbAccess() {
+        val p = player
+        val item = _state.value.item
+        if (p == null || item == null || item.source != MediaSource.SMB) {
+            Thumbnails.resumeRemoteThumbs()
+            return
+        }
+        // 起播准备期也算占通道：setMediaItem 后必经一次 STATE_IDLE，若只按 playbackState
+        // 判断，IDLE 空档会把 startAt 时暂停的抽帧又放出来，十几个封面和首帧抢同一条 NAS，
+        // 表现就是「点开视频转圈比预期久」。preparing 会一直保持到首帧/错误才清掉。
+        val preparing = _state.value.preparing
+        val busy = preparing || p.playbackState == Player.STATE_BUFFERING ||
+            (p.playbackState == Player.STATE_READY && p.isPlaying)
+        if (busy) Thumbnails.pauseRemoteThumbs() else Thumbnails.resumeRemoteThumbs()
+    }
+
+    /**
      * 低延迟 Wi-Fi 的持有状态。用显式标记而不是每次 acquire/release，
      * 是因为换字幕（soft 重开）会重复走 startAt，引用计数会一路涨上去。
      */
@@ -1288,6 +1427,8 @@ object Playback {
         // 结果是位置回到 0 但立刻又被置回 ended，表现为"按了没反应"。
         // 直接走完整的起播链路（重新 setMediaItem + prepare），和点开视频一致。
         val index = _state.value.queueIndex
+        // 随机一轮播完后再按播放，是重新开一轮；否则袋已空，这一集会立刻又结束
+        if (effectivePlayMode() == com.yaoahos.mypureplayer.data.PlayModes.SHUFFLE) resetShuffleRound()
         if (index >= 0) requestStart(index, 0L)
         else {
             p.seekTo(0L)
@@ -2064,6 +2205,8 @@ object Playback {
                     _state.update { it.copy(playing = false) }
                 }
             }
+            // 每次状态变化都校正一次「抽帧是否让路」：缓冲/播放中让路，暂停/结束恢复
+            syncThumbAccess()
         }
 
         /**
@@ -2085,15 +2228,29 @@ object Playback {
             val p = player
             val held = p != null && p.playWhenReady && p.playbackState != Player.STATE_ENDED
             _state.update { it.copy(playing = isPlaying || held) }
+            // 暂停 / 恢复都要重算让路条件：暂停时继续抽帧，续播时重新让路
+            syncThumbAccess()
         }
 
         override fun onRenderedFirstFrame() {
             // 画面真的画出来了——这才是撤掉转圈的正确时机。
             // 之前用 STATE_READY 撤圈，而 READY 与首帧的先后在不同视频/网络下会翻转；
             // READY 先到时就会出现「转圈没了、画面还没出」的空窗。
+            if (!firstFrameShown) {
+                val cost = SystemClock.elapsedRealtime() - startElapsedRealtime
+                val item = _state.value.item
+                Log.i(TAG, "首帧 ${cost}ms source=${item?.source} ${item?.fileName.orEmpty()}")
+            }
             firstFrameShown = true
             clearBufferingHint()
             _state.update { it.copy(buffering = false, preparing = false) }
+            // 续播提示等到画面真的出来再给：起播失败/回退时不该出现「从 12:34 继续」，
+            // 那时用户要看的是错误原因。位置在跳转前就设好了，这里只负责说出来。
+            val resumeMs = pendingResumeHintMs
+            pendingResumeHintMs = 0L
+            if (resumeMs > 0L) {
+                Notice.info("从 ${Formats.formatDuration(resumeMs)} 继续播放")
+            }
             captureThumbnail()
         }
 
@@ -2139,6 +2296,12 @@ object Playback {
                 !notFound
             ) {
                 retriedNetwork = true
+                // 重试必须换一条新句柄/连接。坏句柄还留在池里时，直接重开 MediaItem 会
+                // 再次 acquire 到同一条死连接，又等满读写超时（几十秒）才报错 ——
+                // 这正是「之前播过、退出后再点还是转圈很久」的成因。
+                if (item.source == MediaSource.SMB) {
+                    playbackKeyOf(item)?.let { SmbHandlePool.invalidate(it) }
+                }
                 startAt(
                     _state.value.queueIndex,
                     positionMs.value,
@@ -2203,23 +2366,44 @@ object Playback {
             3 -> requestStart(index, 0L) // 单集循环：从头重播当前这一集
             2 -> if (size > 0) requestStart(if (hasNext) index + 1 else 0) else finishQueue()
             4 -> {
-                if (size <= 1) {
-                    requestStart(index, 0L)
-                } else {
-                    // 随机不连着抽到同一集；队列较短时排除当前项即可
-                    val candidates = _queue.value.indices.filter { it != index }
-                    requestStart(candidates[kotlin.random.Random.nextInt(candidates.size)], 0L)
-                }
+                val picked = nextShuffleIndex()
+                // 一轮里的每集都播过一次了：停在最后一帧，不重新开始下一轮
+                if (picked != null) requestStart(picked, 0L) else finishQueue()
             }
             1 -> if (hasNext) requestStart(index + 1) else finishQueue()
             else -> finishQueue()
         }
     }
 
-    /** 播完停在结尾：停掉 playWhenReady，媒体键的「播放」会走重启路径而不是重试结束的时间线。 */
+    /**
+     * 播完停在结尾：只关掉 playWhenReady，不 stop/release 播放器，画面留在最后一帧。
+     * 退出播放页、清队列这些显式操作才走 stopInternal；播完本身绝不主动退出。
+     * 媒体键的「播放」会走重启路径，而不是重试已经结束的时间线。
+     */
     private fun finishQueue() {
         runCatching { player?.playWhenReady = false }
-        _state.update { it.copy(playing = false, ended = true, buffering = false, preparing = false) }
+        // 停在最后一帧也要让用户知道「播完了」，否则和手动暂停看起来一样。
+        Notice.info("已播放完毕")
+        // 用户开了开关才退出：退出由导航层 popBackStack 完成，这里只发一次性信号。
+        // 关着的时候什么都不做，播放器保持原样，画面停在最后一帧。
+        //
+        // 画中画 / 后台播放时不弹：那时用户正看着小窗（或根本没在看界面），
+        // 把播放页 pop 掉会直接关掉小窗，与「播完自动返回上一页」的语义也不是一回事。
+        if (settings.exitPlayerWhenDone &&
+            !pictureInPicture &&
+            !_state.value.backgroundAudio
+        ) {
+            requestExitPlayer()
+        }
+        _state.update {
+            it.copy(
+                playing = false,
+                ended = true,
+                buffering = false,
+                preparing = false,
+                shuffleLeft = 0,
+            )
+        }
     }
 
     /** Media3 解码出真实画面尺寸后上报给界面，用于按视频比例自动决定横竖屏 */
@@ -2313,6 +2497,8 @@ object Playback {
         // 无痕播放：只停止新增记录，已有历史一条都不动。
         // 闸门放在最前面，暂停 / 切后台 / 退出播放页 / 换片所有入口都从这里过，不会漏。
         if (settings.incognito) return
+        // 用户刚清掉这一条的进度：队列里的残留轮询不能再把它写回来。
+        if (item.id in clearedProgressIds) return
         // 已经被从队列里摘掉的条目不要再回写历史。
         // 删除视频时顺序是「摘队列 → 清历史」：摘队列会触发 stopInternal，那里的
         // recordHistory(force) 是异步的 —— 少了这道闸，它会在清理之后把刚删掉的

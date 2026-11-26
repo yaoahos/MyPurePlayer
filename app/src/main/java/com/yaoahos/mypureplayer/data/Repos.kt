@@ -143,6 +143,20 @@ class ServerRepo(context: Context) {
     }
 
     /**
+     * 起播 / 取详情 / 取封面前的统一归属校验：服务器匹配 + 条目目录仍在配置的根路径内。
+     *
+     * [forSmbItem] 只比 host 与共享名第一段。把网络位置限制到某个子目录（如 Backup/Link）
+     * 后，历史与播放列表里的旧快照还指向目录之外，只按 host/share 匹配会照旧地址连到
+     * 配置外 —— 起播、补全详情、抽封面三条路径都必须走这里，语义与「在文件夹中显示」
+     * 的校验一致：越界返回 null，调用方按「网络位置已移除」处理，不发起连接。
+     */
+    fun forSmbItemWithin(serverId: Long, uri: String, folderKey: String): SmbServer? {
+        val server = forSmbItem(serverId, uri) ?: return null
+        val folder = folderKey.ifBlank { uri.substringBeforeLast('/', "") }
+        return if (SmbPath.within(folder, server.rootPath)) server else null
+    }
+
+    /**
      * 这台服务器的共享根是否覆盖 [host] / [share] 指向的位置。
      *
      * 服务器填了默认共享目录时要求共享名一致；没填的（先连服务器、再逐层浏览的那种

@@ -43,4 +43,70 @@ internal object SmbPath {
             if (loc.path.isNotEmpty()) append('/').append(loc.path)
         }
     }
+
+    /**
+     * 目录地址的上一级；已经在 [root]（或根本不在它下面）时返回 null。
+     *
+     * 只做字符串层级的截断，不碰凭据：地址里残留的 user:pass@ 在 [split] 里已经去掉，
+     * 界面用的是不含口令的 smb:// 地址，这里原样返回前缀即可。
+     */
+    fun parentOf(path: String, root: String): String? {
+        val p = path.trimEnd('/')
+        val r = root.trimEnd('/')
+        if (p.isEmpty()) return null
+        // 跨共享时不乱退：必须落在同一个 root 之下，且按路径分段比较。
+        // 纯 startsWith 会把 smb://host/share2/a 当成 smb://host/share 的子目录；
+        // 主机 / 共享名大小写也不该把人挡在返回键外面，所以比较忽略大小写、返回原文。
+        val within = r.isEmpty() || p.equals(r, true) || p.startsWith("$r/", true)
+        if (!within) return null
+        val cut = p.substringBeforeLast('/', "")
+        // cut == r：已经到共享根，交给调用方退出页面，而不是退到 smb://host
+        if (cut.isEmpty() || cut.length <= r.length || cut.equals(r, true)) return null
+        return cut
+    }
+
+    /**
+     * [path] 是否落在 [root]（含其子目录）之内。比较忽略末尾斜杠与大小写。
+     *
+     * 用途：历史 / 播放列表里的旧条目可能指向改配置前的目录 —— 共享名第一段还匹配，
+     * 但完整路径已不在服务器当前配置的共享目录下（配置 Backup/Link、条目却在
+     * Backup/PT/临时）。这类「不同源」条目不能再拿旧地址跳转，否则会把用户带到
+     * 配置范围之外，属于安全问题。调用方据此报「网络位置已移除」，不发起导航。
+     */
+    fun within(path: String, root: String): Boolean {
+        val p = path.trim().trimEnd('/')
+        val r = root.trim().trimEnd('/')
+        if (p.isEmpty() || r.isEmpty()) return false
+        return p.equals(r, true) || p.startsWith("$r/", true)
+    }
+
+    /**
+     * 从共享根到 [target] 的完整目录链，含首尾（第一项恒为 [root]，最后一项为 [target]）。
+     *
+     * 用途：「在文件夹中显示」跳到深层目录时，把每一级都压成独立的 NavHost 目的地。
+     * 这样进入动画只播一次（NavHost 只看最终栈顶），而返回是逐级 popBackStack ——
+     * 天然沿目录树退回，不需要在单个页面里用 AnimatedContent 手改层序。
+     *
+     * [target] 不在 [root] 之下时返回空链：调用方（FileLocation）会先判 [within] 并报错，
+     * 绝不能为不同源条目拼出一条跨目录的假链，把用户带到配置范围之外。
+     */
+    fun chainFromRoot(root: String, target: String): List<String> {
+        val r = root.trimEnd('/').ifBlank { "smb:///" }
+        val p = target.trimEnd('/')
+        if (p.isEmpty()) return listOf(r)
+        if (!within(p, r)) return emptyList()
+        val chain = ArrayDeque<String>()
+        var cur = p
+        chain.addFirst(cur)
+        while (true) {
+            val parent = parentOf(cur, r) ?: break
+            chain.addFirst(parent)
+            cur = parent
+        }
+        // parentOf 到共享根就停，链首一般已是链根；若还没到则补上。
+        if (!chain.first().equals(r, true) && r.isNotBlank()) {
+            chain.addFirst(r)
+        }
+        return chain.toList()
+    }
 }

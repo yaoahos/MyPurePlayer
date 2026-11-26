@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -42,7 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
@@ -52,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.collectAsState
 import androidx.navigation.NavHostController
 import com.yaoahos.mypureplayer.BuildConfig
 import com.yaoahos.mypureplayer.R
@@ -60,6 +63,7 @@ import com.yaoahos.mypureplayer.data.Graph
 import com.yaoahos.mypureplayer.data.UpdateChecker
 import com.yaoahos.mypureplayer.data.UpdateLog
 import com.yaoahos.mypureplayer.data.UpdateResult
+import com.yaoahos.mypureplayer.ui.components.isDarkScheme
 import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import com.yaoahos.mypureplayer.ui.components.glassPressable
 import com.yaoahos.mypureplayer.ui.components.glassToggleable
@@ -98,7 +102,12 @@ fun AboutScreen(navController: NavHostController) {
     val downloading = download?.running == true
     val progress = download?.progress ?: 0
 
-    val settings by Graph.settings.settings.collectAsStateWithLifecycle(initialValue = Graph.settings.currentOrNull() ?: AppSettings())
+    // collectAsState 而非 WithLifecycle：后者在本页停驻时不会把新值推下来，
+    // 「启动时检查更新」改完返回会显示旧值。
+    // 徽章不依赖这条 state：深浅直接读 MaterialTheme，改外观由主题重组带过去。
+    val settings by Graph.settings.settings.collectAsState(
+        initial = Graph.settings.currentOrNull() ?: AppSettings()
+    )
 
     Scaffold(
         // 透明容器：背景由根部的常驻玻璃层统一绘制，内部页面与底栏页共用同一张底
@@ -261,7 +270,6 @@ fun AboutScreen(navController: NavHostController) {
         // （左右 22dp / 上下 20dp），底部按钮只隔 16dp，按钮换成与「测试 / 保存」
         // 同一种玻璃按钮。
         GlassPanelDialog(title = "更新日志", onDismiss = { showLog = false }) {
-            val glass = appGlass()
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -291,30 +299,16 @@ fun AboutScreen(navController: NavHostController) {
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(bottom = 2.dp),
                     )
-                    // 按「新增/优化/变更/修复」分段渲染。md 里本来就是这个顺序，
-                    // 这里只切段不重排；前缀提到组标题上，正文也因此少 3 个字、更少折行。
-                    // 一整版 22 条若继续平铺成一片灰字，读起来就是「堆在一块」。
-                    note.notes.byCategory().forEachIndexed { groupIndex, (category, items) ->
-                        if (category.isNotEmpty()) {
-                            Text(
-                                category,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.6.sp,
-                                color = glass.accent,
-                                modifier = Modifier.padding(top = if (groupIndex == 0) 8.dp else 14.dp),
-                            )
-                        } else if (groupIndex > 0) {
-                            Spacer(Modifier.height(6.dp))
-                        }
-                        items.forEach { line ->
-                            Text(
-                                "· $line",
-                                style = MaterialTheme.typography.bodySmall,
-                                lineHeight = 18.sp,
-                                modifier = Modifier.padding(top = 4.dp),
-                            )
-                        }
+                    // 逐条平铺，保留 md 里的「新增：」「优化：」前缀，不再按分类切组。
+                    // 分类标题会把同一句话拆成标题+正文两行，一版 22 条时反而多占一大截高度；
+                    // 原文自带类别前缀，平铺照样看得出是新增还是修复。
+                    note.notes.forEachIndexed { lineIndex, line ->
+                        Text(
+                            "· $line",
+                            style = MaterialTheme.typography.bodySmall,
+                            lineHeight = 18.sp,
+                            modifier = Modifier.padding(top = if (lineIndex == 0) 8.dp else 4.dp),
+                        )
                     }
                 }
                 // 「查看更早的版本」属于**内容**，跟在最后一条日志后面，随日志一起滚动。
@@ -479,49 +473,73 @@ fun AppIconBadge(
     modifier: Modifier = Modifier,
 ) {
     // 桌面自适应图标只显示 108 视口中心的 72×72（1/1.5 缩放），
-    // 这里把前景按 1.5 倍画进徽章并裁切，可见图案与桌面图标完全一致。
+    // 这里把两层矢量按 1.5 倍画进徽章并裁切，可见图案与桌面图标完全一致。
     //
-    // 底色必须与 ic_launcher_background.xml 对齐：对角渐变 + 中心一圈靛蓝环境光。
-    // 只画渐变的话，圆盘下部在徽章里会贴着一块更亮的底，"黑色底层"这一层的明暗关系
-    // 与桌面上看到的不一样，同一枚图标在两个位置呈现两种质感。
-    val corner = size * 0.26f
-    // 环境光的半径按图标里的 46/108 换算，保证徽章与桌面是同一个衰减范围
-    val envRadius = with(androidx.compose.ui.platform.LocalDensity.current) { (size * (46f / 108f)).toPx() }
+    // 必须用 requiredSize 而不是 size：size 会 constrain 到父级传入的
+    // max 约束（Box 给子项的 max 就是自身边长），1.5 倍会被夹回 1.0 倍，
+    // 实际画的是完整 108 视口 —— 盘径只占徽章 51%，比桌面小一大截。
+    // requiredSize 不受父约束限制，超出部分交给外层 clip 裁掉。
+    //
+    // 底板同样读 ic_launcher_background.xml，不再手抄渐变：
+    // 之前这里是一份硬编码的深蓝底 + 靛蓝环境光，图标改版后没有同步，
+    // 徽章一直停在旧配色，与桌面上那枚不是同一个底色。
+    // background/foreground 都是普通 <vector>，painterResource 能直接加载
+    // （只有 mipmap-anydpi-v26 的 adaptive-icon XML 不行）。
+    // 徽章底色与关于页背景同属「白 / 淡蓝白」，不描边时整块板会消失在页面里，
+    // 只剩一个蓝球浮着（第 23 版真机截图）。
+    //
+    // 第 27 版把轮廓做进了图标自己的底板：可见区内缘 1.2u / 22% 的收口。
+    // 徽章按 1.5 倍画、裁到 72×72 显示，收口正好落在徽章边缘，于是这里原有的
+    // 0.75dp 描边会变成第二道边 —— 撤掉，只留投影负责「浮起来」。
+    // 第 26 版「图标画不出跟随遮罩的边」的结论仍然成立，但那针对的是描在板沿
+    // 上的线；板内侧的收口不跟随遮罩，三种遮罩下都连续，所以能两边同源。
+    //
+    // 深色图标必须由代码显式选资源，不能靠资源限定符：
+    // 限定符跟随的是「系统」深色模式，而本应用允许在设置里强制深色/浅色。
+    // 系统浅色 + 应用强制深色时，按限定符取图仍会拿到浅色版，
+    // 结果就是深色页面上摆了一块白板（真机复现过）。
+    // 所以按 isDarkScheme()（读实际生效配色，已兼容强制开关与动态取色）选图。
+    // 桌面图标没有代码参与，固定用浅色板：MIUI 桌面把图标位图缓存在桌面进程里，
+    // 既不认系统深色变化，也不认覆盖安装，只有重启桌面或重启手机才重建
+    // （实测：切深色不变 / 覆盖安装不变 / force-stop 桌面立即变）。
+    // 与其给一枚切了也不动的夜间图标，不如统一浅色，桌面始终是设计基准那版。
+    // 桌面既然固定浅色，徽章也就不再提供「固定浅色」的开关 —— 少一个只管两处
+    // 图标、又和桌面不一致的选项，用户不必理解边界。
+    //
+    // 深浅由 isDarkScheme() 直接读实际生效配色（已兼容强制外观与动态取色），
+    // 父页面不需要再传值：这里不 collect flow，改完设置返回时随重组刷新。
+    val dark = MaterialTheme.colorScheme.isDarkScheme()
+    // 浅色直接取原件：drawable-night 已撤掉，这两个 id 不再有夜间变体，
+    // 系统深色下由 dark 分支接管，所以浅色分支取到的必定是浅色板。
+    // 深色走 _night 副本，两份的结构唯一差别是底板色与收口方向。
+    val (bgRes, fgRes) = if (dark) {
+        R.drawable.ic_launcher_background_night to R.drawable.ic_launcher_foreground_night
+    } else {
+        R.drawable.ic_launcher_background to R.drawable.ic_launcher_foreground
+    }
+    val shape = RoundedCornerShape(size * 0.26f)
     Box(
         modifier
             .size(size)
-            .clip(RoundedCornerShape(corner))
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        androidx.compose.ui.graphics.Color(0xFF0B1836),
-                        androidx.compose.ui.graphics.Color(0xFF050C1C),
-                        androidx.compose.ui.graphics.Color(0xFF01030A),
-                    ),
-                ),
-            ),
+            .shadow(
+                elevation = 3.dp,
+                shape = shape,
+                clip = false,
+                ambientColor = Color(0x30254A8C),
+                spotColor = Color(0x30254A8C),
+            )
+            .clip(shape),
         contentAlignment = Alignment.Center,
     ) {
-        Box(
-            Modifier
-                .matchParentSize()
-                .background(
-                    Brush.radialGradient(
-                        colorStops = arrayOf(
-                            0f to androidx.compose.ui.graphics.Color(0x3D2F6BFF),
-                            0.42f to androidx.compose.ui.graphics.Color(0x162F6BFF),
-                            0.74f to androidx.compose.ui.graphics.Color(0x062F6BFF),
-                            1f to androidx.compose.ui.graphics.Color(0x002F6BFF),
-                        ),
-                        center = androidx.compose.ui.geometry.Offset.Unspecified,
-                        radius = envRadius,
-                    ),
-                ),
+        Image(
+            painter = painterResource(bgRes),
+            contentDescription = null,
+            modifier = Modifier.requiredSize(size * 1.5f),
         )
         Image(
-            painter = painterResource(R.drawable.ic_launcher_foreground),
+            painter = painterResource(fgRes),
             contentDescription = null,
-            modifier = Modifier.size(size * 1.5f),
+            modifier = Modifier.requiredSize(size * 1.5f),
         )
     }
 }
@@ -592,25 +610,4 @@ private fun SectionFrame(
             content = content,
         )
     }
-}
-
-/** 条目前缀形如「新增：」「优化:」；中文冒号是惯例，英文冒号一并容错 */
-private val CATEGORY_PREFIX = Regex("^(新增|优化|变更|修复)[：:]\\s*")
-
-/**
- * 把一版日志按「新增 / 优化 / 变更 / 修复」切成连续的组。
- *
- * 只切段、不排序：md 里本来就按这四类写，重排反而会让「新增」跑到「修复」后面。
- * 没有前缀的条目（1.0.0 的功能式写法）归到空分类，由调用方原样当项目符号列出。
- */
-private fun List<String>.byCategory(): List<Pair<String, List<String>>> {
-    val groups = ArrayList<Pair<String, ArrayList<String>>>()
-    for (line in this) {
-        val match = CATEGORY_PREFIX.find(line)
-        val category = match?.groupValues?.getOrNull(1).orEmpty()
-        val body = if (match != null) line.substring(match.range.last + 1).trim() else line
-        if (groups.isEmpty() || groups.last().first != category) groups += category to ArrayList()
-        groups.last().second += body
-    }
-    return groups.map { (category, items) -> category to items.toList() }
 }

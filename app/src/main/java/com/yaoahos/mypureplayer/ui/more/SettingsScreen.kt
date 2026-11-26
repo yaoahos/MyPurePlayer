@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -233,6 +235,12 @@ fun SettingsScreen(navController: NavHostController) {
                         )
                     }
                 }
+                SettingsSwitchRow(
+                    title = "播完退出播放界面",
+                    subtitle = "关闭时停在最后一帧，开启后播完自动返回上一页",
+                    checked = settings.exitPlayerWhenDone,
+                    onCheckedChange = { scope.launchUi { Graph.settings.setExitPlayerWhenDone(it) } },
+                )
                 SettingsSwitchRow(
                     title = "自动加载同名字幕",
                     subtitle = "播放时自动加载同目录下的同名字幕",
@@ -531,7 +539,7 @@ private fun SettingsSwitchRow(
 /**
  * 主题色选择器：一排色点 + 当前配色名。
  *
- * 用色点而不是文字 Chip：颜色本身就是信息，六个中文名排一行反而要读。
+ * 用色点而不是文字 Chip：颜色本身就是信息，一排中文名反而要读。
  * 选中项外面加一圈同色描边（不是白圈），在浅色卡片上也看得出选的是哪个。
  */
 @Composable
@@ -543,6 +551,10 @@ private fun PalettePicker(
     Row(
         Modifier
             .fillMaxWidth()
+            // 7 个色点在窄屏上按 34dp + 间距会超出可用宽度，Row 会把最后一个 Box
+            // 横向压扁成椭圆（实测 114×128，其余是 98×98 正圆）。加横向滚动兜底，
+            // 让每个色点拿满自己的宽度；正常宽度下不会滚动，窄屏也能完整选到最后一个。
+            .horizontalScroll(rememberScrollState())
             .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -553,7 +565,9 @@ private fun PalettePicker(
             // 不像加了一个白底胶囊那么抢眼
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    // size 在父级空间不足时会被压缩成椭圆；requiredSize 锁定正方形，
+                    // 配合上面的 horizontalScroll，超出部分滚动而不是挤扁
+                    .requiredSize(34.dp)
                     .clip(CircleShape)
                     .then(
                         if (isSelected) {
@@ -574,7 +588,7 @@ private fun PalettePicker(
             ) {
                 Box(
                     Modifier
-                        .size(if (isSelected) 20.dp else 26.dp)
+                        .requiredSize(if (isSelected) 20.dp else 26.dp)
                         .clip(CircleShape)
                         .background(
                             if (dimmed) palette.seed.copy(alpha = 0.30f) else palette.seed,

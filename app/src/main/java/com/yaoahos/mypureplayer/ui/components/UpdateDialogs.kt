@@ -20,7 +20,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -183,7 +182,7 @@ fun UpdateAvailableDialog(
             }
             Spacer(Modifier.height(6.dp))
             // 进度条比纯文字百分比更好读：下载 30MB 的包，光看数字没有"还剩多少"的量感
-            LinearProgressIndicator(
+            com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
                 progress = { (progress.coerceIn(0, 100)) / 100f },
                 modifier = Modifier.fillMaxWidth().height(3.dp),
             )

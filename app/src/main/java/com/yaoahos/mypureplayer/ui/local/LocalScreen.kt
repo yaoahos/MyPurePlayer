@@ -2,12 +2,11 @@ package com.yaoahos.mypureplayer.ui.local
 
 import com.yaoahos.mypureplayer.ui.components.GlassDialogButton
 import com.yaoahos.mypureplayer.ui.components.GlassButtonTone
+import com.yaoahos.mypureplayer.ui.components.glassPageBackground
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -22,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.FormatListBulleted
@@ -29,7 +29,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.DriveFileRenameOutline
 import androidx.compose.material.icons.rounded.Folder
@@ -47,13 +47,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +82,7 @@ import com.yaoahos.mypureplayer.ui.HideShellBottomBar
 import java.io.File
 import com.yaoahos.mypureplayer.ui.MainScaffold
 import com.yaoahos.mypureplayer.ui.MainTab
+import com.yaoahos.mypureplayer.ui.FileLocation
 import com.yaoahos.mypureplayer.ui.Routes
 import com.yaoahos.mypureplayer.ui.components.alertDialogGlassSurface
 import com.yaoahos.mypureplayer.ui.components.appDialogSurface
@@ -118,7 +119,17 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LocalScreen(navController: NavHostController) {
+fun LocalScreen(
+    navController: NavHostController,
+    /**
+     * 文件夹目的地：非空表示本页是 NavHost 里的一层目录，只显示该目录视频；
+     * 首页（壳层 tab）恒为 null。目录层级完全由 NavHost 承载 —— 进文件夹 push 一个
+     * 目的地、返回 pop，与其它内层页走同一套转场，页内不再有第二套弹簧动画。
+     */
+    initialFolderKey: String? = null,
+    /** 「在文件夹中显示」带来的目标视频标识；命中该卡片则高亮并滚动到它。 */
+    focus: String = "",
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -130,42 +141,53 @@ fun LocalScreen(navController: NavHostController) {
     // 保险箱是否已解锁（数据密钥在内存里）。锁定状态下直接隐藏必然失败，
     // 必须先让他输一次密码 —— 见下方 onHide 分支。
     val vaultUnlocked by Graph.vault.unlocked.collectAsStateWithLifecycle()
+    val settings by Graph.settings.settings.collectAsStateWithLifecycle(
+        initialValue = Graph.settings.currentOrNull() ?: com.yaoahos.mypureplayer.data.AppSettings(),
+    )
 
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    var gridMode by rememberSaveable { mutableStateOf(true) }
+    var gridMode by rememberSaveable { mutableStateOf(settings.localGrid) }
     var sortSheetOpen by remember { mutableStateOf(false) }
-    var sortName by rememberSaveable { mutableStateOf(SortKey.DATE.name) }
-    var ascending by rememberSaveable { mutableStateOf(false) }
-    // null = 全部视频；非 null = 已进入某个文件夹
-    var currentFolderKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var sortName by rememberSaveable { mutableStateOf(settings.localSort) }
+    var ascending by rememberSaveable { mutableStateOf(settings.localAscending) }
+    // null = 全部视频（首页）；非 null = 本页所在的文件夹目的地（固定不变）。
+    // 目录层级改由 NavHost 目的地承载：进文件夹 push、返回 pop，不再在页内改这个值。
+    val currentFolderKey: String? = initialFolderKey
+
+    // 进文件夹防连点：flashClick 只是延后动作、并不拦重复点击，快速连点同一张
+    // 文件夹卡片会连 push 两层相同目的地，返回时要按两次才退出来。转场期间旧页
+    // 还活着，它上面的卡片再点一次同样会叠第二次转场。与 SMB 目录页同一套做法：
+    // 一次放行后锁 600ms（大于 300ms 转场、短于用户再次点击的间隔）。
+    var folderNavPending by remember { mutableStateOf(false) }
+    LaunchedEffect(folderNavPending) {
+        if (folderNavPending) {
+            kotlinx.coroutines.delay(600)
+            folderNavPending = false
+        }
+    }
+    fun openFolder(key: String) {
+        if (folderNavPending) return
+        folderNavPending = true
+        // 不能加 launchSingleTop：参数化路由只看 destination id，会把上一层目录顶掉，
+        // 从子文件夹返回就跳过父目录。防连点交给 folderNavPending。
+        navController.navigate(Routes.localFolder(key))
+    }
     // 1 文件夹 / 2 视频：本地视频的「文件夹 / 视频」浏览方式切换（2026-11-22 按用户要求恢复）
-    var browseMode by rememberSaveable { mutableIntStateOf(1) }
-
-    // 本地进文件夹用页内状态切换（不走 NavHost），为了让转场与网络页进入 SMB 目录的
-    // 水平滑动一致，这里用位移动画模拟同样的 300ms 整屏滑动。
-    //
-    // 关键：起始位移必须在**组合期**就定好（remember 的初值），不能放到 LaunchedEffect 里 snap。
-    // LaunchedEffect 要等首帧画完才跑，于是旧写法会「先画一帧已经到位的新页面，
-    // 再瞬移到屏外滑回来」—— 用户看到的就是返回首页时整页左右晃一下。
-    // 用 remember(currentFolderKey) 重建 Animatable：key 一变，第一帧就渲染在屏外，
-    // 之后 animateTo(0) 只是单向滑入，不再有回弹。
-    var lastFolderKey by remember { mutableStateOf(currentFolderKey) }
-    val slideDistance = remember { context.resources.displayMetrics.widthPixels.toFloat() }
-    val folderSlide = remember(currentFolderKey) {
-        folderSlideFor(lastFolderKey, currentFolderKey, slideDistance)
-    }
-    LaunchedEffect(currentFolderKey) {
-        lastFolderKey = currentFolderKey
-        // 页内文件夹滑动刻意保留弹簧（PageMotion.PageSpringF）——这是用户从头到尾
-        // 认可的手感，参数不要动。注意它与 NavHost 页面转场已不是同一条曲线：
-        // 页面转场 2026-11-22 起定稿为 tween(300, FastOutSlowIn)
-        // 两层视差（见 PageMotion.kt），本条是仅存的页内例外。
-        folderSlide.animateTo(0f, com.yaoahos.mypureplayer.ui.PageMotion.PageSpringF)
+    var browseMode by rememberSaveable { mutableIntStateOf(settings.localBrowseMode) }
+    // 设置在别处被改（配置恢复）时同步；只盯这几个字段，改主题等不会覆盖页内草稿
+    LaunchedEffect(settings.localGrid, settings.localSort, settings.localAscending, settings.localBrowseMode) {
+        gridMode = settings.localGrid
+        sortName = settings.localSort
+        ascending = settings.localAscending
+        browseMode = settings.localBrowseMode
     }
 
-    // 在文件夹内按系统返回键先退回上一层文件夹，而不是直接退出应用
-    BackHandler(enabled = currentFolderKey != null) { currentFolderKey = null }
+    // 返回统一交给 NavHost：文件夹目的地 pop 掉自己就露出下面的首页（带常驻底栏）。
+    // 本地目录只有一层（进入某个文件夹后只列视频、不再往下钻），所以一次 pop 到位，
+    // 不存在「先退回首页文件夹、再返回一次才见底栏」的中间态。
+    // 系统返回键与顶栏返回按钮都走这条路，动画与全站页面转场完全一致（PageMotion）。
+    BackHandler(enabled = currentFolderKey != null) { navController.popBackStack() }
 
     // 搜索框的返回同样优先于"退出应用"：先收搜索框并清空关键词。
     // 必须写在上面那条 BackHandler **之后**——同一时刻有多个启用时，
@@ -175,14 +197,16 @@ fun LocalScreen(navController: NavHostController) {
         query = ""
     }
 
-    // 下钻进文件夹、或进入多选态时，壳层常驻底栏必须让位给页面自己的操作栏。
-    // 「文件夹 / 视频」浏览方式放在「排列与排序」面板里切换（browseMode）。
+    // 只有多选态才让壳层常驻底栏让位给页面自己的四宫格操作栏。
+    // 文件夹目的地与其它内层页一致：靠 PageRoot 的不透明背景把底栏盖住，
+    // 进/出时由页面侧滑"一体"遮住或露出底栏。之前这里额外把底栏从组合里
+    // 直接移除，导致底栏先闪消失、页面才滑入，返回时反过来（底栏最后才闪出来）。
     var sortDraft by remember { mutableStateOf<MediaSortDraft?>(null) }
 
     // 长按只进入选择态；动作从顶栏 / 底部四宫格操作栏发起。
     val selection = remember { ListSelection() }
 
-    HideShellBottomBar(selection.active || currentFolderKey != null)
+    HideShellBottomBar(selection.active)
 
     BackHandler(enabled = selection.active && !searchOpen) { selection.exit() }
     var infoFolder by remember { mutableStateOf<FolderGroup?>(null) }
@@ -273,18 +297,35 @@ fun LocalScreen(navController: NavHostController) {
     }
 
     LaunchedEffect(Unit) {
-        // 首次进入静默扫描，列表为空时由 EmptyState 兜底，不需要闪一下转圈
-        if (granted) autoScan() else askPermission()
-        Graph.vault.load()
-        Graph.trash.load()
+        // 文件夹目的地只读首页已经加载好的内存数据：进 Camera 这类视频很多目录时，
+        // 一次 MediaStore 全量扫描 + 保险箱/回收站读盘正好压在 300ms 转场落位那一帧，
+        // 就是"进文件夹卡一下"的来源。扫描只在首页做，文件夹里需要刷新时走下拉刷新。
+        if (currentFolderKey == null) {
+            if (granted) autoScan() else askPermission()
+            Graph.vault.load()
+            Graph.trash.load()
+        }
+    }
+
+    // 首次进视频多的文件夹会掉帧：首屏十几张卡同时生成缩略图（分配位图+JPEG落盘+
+    // 重组）压在 300ms 滑入动画上。转场期间先暂停本地缩略图生成，落位后再统一
+    // 恢复、渐次出图；磁盘缓存命中的（滑到底后再进）不受影响，照常秒开。
+    LaunchedEffect(currentFolderKey) {
+        if (currentFolderKey == null) return@LaunchedEffect
+        Thumbnails.pauseLocalThumbs()
+        try {
+            delay(TRANSITION_SETTLE_MS)
+        } finally {
+            Thumbnails.resumeLocalThumbs()
+        }
     }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         if (FileOps.hasAllFiles(context)) resumePendingPermissionOp()
-        // 静默扫描：切回本页时若内容没变就不闪转圈、不重组整页
-        if (!granted) return@LifecycleEventEffect
+        // 文件夹页不在 ON_RESUME 里全量扫描，否则每次从视频详情/播放页返回都会重建整张列表
+        if (!granted || currentFolderKey != null) return@LifecycleEventEffect
         scope.launch {
-            // 让转场先跑完（页面弹簧约 320ms 落位）
+            // 让转场先跑完（页面切换约 300ms 落位）
             delay(TRANSITION_SETTLE_MS)
             autoScan()
         }
@@ -292,8 +333,16 @@ fun LocalScreen(navController: NavHostController) {
 
     val durationVersion by Thumbnails.durationVersion.collectAsStateWithLifecycle()
     val durationTick = if (sortKey == SortKey.DURATION) durationVersion else 0
-    val filtered = remember(videos, query, sortKey, ascending, durationTick) {
-        val base = videos.filter { item ->
+    // 先按目录收窄，再过滤/排序。
+    //
+    // 旧实现对着整个本地库做一次 filter + sortedWith，再在结果里挑出本目录的视频。
+    // 首页（几千条）需要这样；但进了文件夹页只要本目录那几十上百条，却也把全库
+    // 重新排一遍 —— 每次进入都是一次纯属白干的主线程开销，视频越多越明显。
+    val baseVideos = remember(videos, currentFolderKey) {
+        if (currentFolderKey == null) videos else videos.filter { it.folderKey == currentFolderKey }
+    }
+    val filtered = remember(baseVideos, query, sortKey, ascending, durationTick) {
+        val base = baseVideos.filter { item ->
             query.isBlank() ||
                 item.title.contains(query, ignoreCase = true) ||
                 item.fileName.contains(query, ignoreCase = true) ||
@@ -308,7 +357,13 @@ fun LocalScreen(navController: NavHostController) {
         base.sortedWith(if (ascending) comparator else comparator.reversed())
     }
 
-    val groups = remember(videos) { Graph.local.folders() }
+    // 文件夹分组只有首页用得到：目录页不分文件夹，也不显示文件夹卡片。
+    // 目录页跳过这次 groupBy + 排序，同样是「进入时少做一件与当前页无关的事」。
+    val groups = if (currentFolderKey == null) {
+        remember(videos) { Graph.local.folders() }
+    } else {
+        emptyList()
+    }
     // v:/d: 前缀区分视频与文件夹，避免两者 id 恰好相同
     val selectedVideos = remember(videos, selection.ids) {
         videos.filter { selection.contains("v:${it.id}") }
@@ -325,11 +380,12 @@ fun LocalScreen(navController: NavHostController) {
     val selectedCount = selectedVideos.size + selectedGroups.size
     val soloVideo = selectedVideos.singleOrNull()
     val soloGroup = selectedGroups.singleOrNull()
-    val scopedVideos = remember(filtered, currentFolderKey) {
-        if (currentFolderKey == null) filtered
-        else filtered.filter { it.folderKey == currentFolderKey }
+    // filtered 已经在目录页按 folderKey 收窄过，这里直接就是本页要显示的视频
+    val scopedVideos = filtered
+    val currentFolderName = remember(currentFolderKey, scopedVideos) {
+        if (currentFolderKey == null) ""
+        else scopedVideos.firstOrNull()?.folderName?.takeIf { it.isNotBlank() } ?: "文件夹"
     }
-    val currentFolderName = groups.firstOrNull { it.key == currentFolderKey }?.name.orEmpty()
     // browseMode=1（文件夹）：只列文件夹；进入某个文件夹后只列该文件夹的视频。
     // browseMode=2（视频）：铺平列出全部视频，不显示文件夹、退出文件夹层级。
     val visibleFolders = remember(groups, query, browseMode, currentFolderKey) {
@@ -337,6 +393,35 @@ fun LocalScreen(navController: NavHostController) {
         else groups.filter { query.isBlank() || it.name.contains(query, ignoreCase = true) }
     }
     val visibleVideos = if (browseMode == 1 && currentFolderKey == null) emptyList() else scopedVideos
+
+    // 「在文件夹中显示」的定位描边只在刚跳进来时有意义：它标的是"你要找的就是这一条"。
+    // 用户播完这条视频再返回，描边还亮着就会被误认成多选选中态（用户 2026-11-27 反馈）。
+    // 因此这里不直接用路由参数，而是留一份可清空的状态：匹配到的那条一开始播放就置空。
+    // 用 rememberSaveable 记住 focus 作为输入：换一个目标重新跳转时能重新生效。
+    var activeFocus by rememberSaveable(focus) { mutableStateOf(focus) }
+
+    // 「在文件夹中显示」的目标定位：瞬时滚动到目标卡片，不引入新动画。
+    // 列表前面可能有文件夹行（首页场景），算上偏移；文件夹目的地里 visibleFolders 为空。
+    val gridState = rememberLazyGridState()
+    val focusIndex = remember(visibleVideos, activeFocus) {
+        if (activeFocus.isBlank()) -1
+        else visibleVideos.indexOfFirst { FileLocation.matches(it, activeFocus) }
+    }
+    LaunchedEffect(activeFocus, focusIndex, visibleVideos.size, visibleFolders.size, browseMode, gridMode) {
+        if (focusIndex < 0) return@LaunchedEffect
+        gridState.scrollToItem((visibleFolders.size + focusIndex).coerceAtLeast(0))
+    }
+
+    /**
+     * 播放视频，并撤掉「在文件夹中显示」的定位描边。
+     *
+     * 只有播的正是被定位的那一条才清：播别的视频时，描边指向的目标还在，仍然有用。
+     * 宫格与列表两个分支共用，避免两处各写一遍又把语义写歪。
+     */
+    fun playFromFocus(item: VideoItem, play: () -> Unit) {
+        if (FileLocation.matches(item, activeFocus)) activeFocus = ""
+        play()
+    }
 
     /**
      * 忙碌遮罩的统一实现。
@@ -386,11 +471,11 @@ fun LocalScreen(navController: NavHostController) {
         runBusyInternal(text, showProgress = false) { block() }
     }
 
+    // 目录层级改由 NavHost 目的地承载后，这一层不再是「页内位移」，而是整页转场：
+    // 进入时新页从右滑入、返回时旧页右滑出，全部由 AppNavHost 的 page 套动画接管。
+    // 因此不再需要页内 Animatable / graphicsLayer，也不再需要额外垫背景补空白。
+    Box(Modifier.fillMaxSize().glassPageBackground()) {
     MainScaffold(
-        // 页内下钻只移动**内容区**：底栏是壳层的常驻元素，不参与这次位移。
-        // 一个永远不动的底栏，配上一条自己滑的页面，任何时刻都不会出现
-        // "底栏先到、页面后到"的错位。
-        modifier = Modifier.graphicsLayer { translationX = folderSlide.value },
         topBar = {
             if (selection.active) {
                 PageTopBar(
@@ -423,7 +508,7 @@ fun LocalScreen(navController: NavHostController) {
                         browseMode == 2 -> "共 ${videos.size} 个视频"
                         else -> "共 ${videos.size} 个视频 · ${groups.size} 个文件夹"
                     },
-                    onBack = if (currentFolderKey == null) null else ({ currentFolderKey = null }),
+                    onBack = if (currentFolderKey != null) ({ navController.popBackStack() }) else null,
                     actions = {
                         IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) query = "" }) {
                             Icon(Icons.Rounded.Search, contentDescription = "搜索")
@@ -456,7 +541,7 @@ fun LocalScreen(navController: NavHostController) {
                                 }
                                 soloGroup != null -> {
                                     selection.exit()
-                                    currentFolderKey = soloGroup.key
+                                    navController.navigate(Routes.localFolder(soloGroup.key))
                                 }
                             }
                         },
@@ -524,7 +609,7 @@ fun LocalScreen(navController: NavHostController) {
                             null
                         } else {
                             SelectionAction(
-                                Icons.Rounded.History,
+                                Icons.Rounded.DeleteSweep,
                                 "删除历史",
                                 enabled = canAct && hasHistory,
                             ) {
@@ -595,6 +680,7 @@ fun LocalScreen(navController: NavHostController) {
 
                     gridMode -> LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = adaptiveMediaGridMinSize()),
+                        state = gridState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = PageMetrics.HPad, end = PageMetrics.HPad, top = 8.dp, bottom = 28.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -607,7 +693,7 @@ fun LocalScreen(navController: NavHostController) {
                                 subtitle = "${group.videos.size} 个视频",
                                 onClick = {
                                     if (selection.active) selection.toggle("d:${group.key}")
-                                    else currentFolderKey = group.key
+                                    else openFolder(group.key)
                                 },
                                 onLongClick = { selection.enter("d:${group.key}") },
                                 selected = selection.contains("d:${group.key}"),
@@ -619,17 +705,21 @@ fun LocalScreen(navController: NavHostController) {
                                 item = item,
                                 onClick = {
                                     if (selection.active) selection.toggle("v:${item.id}")
-                                    else startPlayback(navController, item)
+                                    else {
+                                        playFromFocus(item) { startPlayback(navController, item) }
+                                    }
                                 },
                                 onLongClick = { selection.enter("v:${item.id}") },
                                 selected = selection.contains("v:${item.id}"),
                                 selecting = selection.active,
+                                focused = FileLocation.matches(item, activeFocus),
                             )
                         }
                     }
 
                     else -> LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = listRowMinSize()),
+                        state = gridState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = PageMetrics.HPad, end = PageMetrics.HPad, top = 4.dp, bottom = 28.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -645,7 +735,7 @@ fun LocalScreen(navController: NavHostController) {
                                     showSubtitle = true,
                                     onClick = {
                                         if (selection.active) selection.toggle("d:${group.key}")
-                                        else currentFolderKey = group.key
+                                        else openFolder(group.key)
                                     },
                                     onLongClick = { selection.enter("d:${group.key}") },
                                     selected = selection.contains("d:${group.key}"),
@@ -659,11 +749,14 @@ fun LocalScreen(navController: NavHostController) {
                                     item = item,
                                     onClick = {
                                         if (selection.active) selection.toggle("v:${item.id}")
-                                        else startPlayback(navController, item)
+                                        else {
+                                            playFromFocus(item) { startPlayback(navController, item) }
+                                        }
                                     },
                                     onLongClick = { selection.enter("v:${item.id}") },
                                     selected = selection.contains("v:${item.id}"),
                                     selecting = selection.active,
+                                    focused = FileLocation.matches(item, activeFocus),
                                 )
                             }
                         }
@@ -707,7 +800,7 @@ fun LocalScreen(navController: NavHostController) {
                                     maxLines = 2,
                                 )
                             }
-                            LinearProgressIndicator(
+                            com.yaoahos.mypureplayer.ui.components.WatchProgressBar(
                                 progress = { progress },
                                 modifier = Modifier.width(200.dp),
                             )
@@ -721,6 +814,7 @@ fun LocalScreen(navController: NavHostController) {
                 }
             }
         }
+    }
     }
 
     // ------------------------------------------------------------ 面板与对话框
@@ -808,10 +902,19 @@ fun LocalScreen(navController: NavHostController) {
     }
 
     if (sortSheetOpen) {
+        // 「文件夹 / 视频」浏览方式只在首页层级有意义：进到某个文件夹后列表里全是该目录
+        // 的视频，没有文件夹可切，面板里再摆一个浏览方式是无效选项。
+        val inFolder = currentFolderKey != null
         SortLayoutSheet(
             onDismiss = {
-                // onPreview 已实时应用选择；不能再用打开面板时的旧快照覆盖，
-                // 否则点遮罩关闭会撤销刚选的排序/布局，看起来像「排序没生效」。
+                // 取消（含点遮罩/按返回键）要把 onPreview 的实时改动全部回滚到 opening 快照；
+                // 只对"没点确定"生效——确定时 onApply 已先清空 sortDraft，这里不会覆盖。
+                sortDraft?.let { draft ->
+                    gridMode = draft.grid
+                    sortName = draft.key
+                    ascending = draft.ascending
+                    browseMode = draft.browseMode
+                }
                 sortDraft = null
                 sortSheetOpen = false
             },
@@ -819,13 +922,13 @@ fun LocalScreen(navController: NavHostController) {
             initialSort = sortKey,
             initialAscending = ascending,
             entries = listOf(SortKey.NAME, SortKey.DATE, SortKey.DURATION, SortKey.SIZE),
-            browseMode = browseMode,
+            browseMode = if (inFolder) null else browseMode,
             onPreviewBrowseMode = { mode -> browseMode = mode },
             onApplyBrowseMode = { mode ->
                 browseMode = mode
-                // 只有切到「视频」（铺平全部视频）才需要退出文件夹；
-                // 在文件夹里只改列表/网格、排序时继续留在当前文件夹。
-                if (mode == 2) currentFolderKey = null
+                // 「媒体浏览方式」只在首页出现；若确实在文件夹目的地里被切到「视频」，
+                // 用 pop 退回首页，而不是改页内状态（目录层级已交给 NavHost）。
+                if (mode == 2 && currentFolderKey != null) navController.popBackStack()
             },
             onPreview = { grid, key, asc ->
                 gridMode = grid
@@ -837,6 +940,9 @@ fun LocalScreen(navController: NavHostController) {
                 sortName = key.name
                 ascending = asc
                 sortDraft = null
+                scope.launch {
+                    Graph.settings.setLocalLayout(grid, key.name, asc, browseMode)
+                }
             },
         )
     }
@@ -917,8 +1023,9 @@ fun LocalScreen(navController: NavHostController) {
             destructive = true,
             onConfirm = {
                 pendingHistoryDelete = null
-                scope.launch {
-                    val n = Graph.history.removeAll(targets.map { it.id })
+                    com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(targets.map { it.id })
+                    scope.launch {
+                        val n = Graph.history.removeAll(targets.map { it.id })
                     Notice.success(if (n > 0) "已删除 $n 条观看记录" else "没有可删除的观看记录")
                 }
                 selection.exit()
@@ -1066,31 +1173,6 @@ fun startPlayback(navController: NavHostController, item: VideoItem) {
     Playback.playChecked(if (index >= 0) list else listOf(item), index.coerceAtLeast(0)) {
         navController.navigate(Routes.PLAYER)
     }
-}
-
-/**
- * 文件夹切换动画的起点。
- *
- * 只有在**组合期**就把起点定好，第一帧才不会被画出「新内容已经到位」的样子。
- *  - key 没变（首次组合）：0，不做动画；
- *  - 进入文件夹：从右侧屏外整屏滑入（与 NavHost 的 forwardEnter 同参）；
- *  - 返回首页：从左侧 **1/3 屏**处补满（与 NavHost 的 popEnter 同参）。
- *
- * 这条位移由本页自己的 `Animatable` 驱动，与 NavHost 那条路径互不相干 —— 也正因为如此，
- * 它是 2026-11-21 那轮错误改造里唯一没被波及、始终正确的返回路径
- * （当时 NavHost 的返回被改成"不做转场"，用户一眼看出只有本地视频还是原样）。
- *
- * 返回为什么不是整屏：网络页从 SMB 目录退回时，上一层只退了 1/3、这里从 -1/3 补满，
- * 读起来是"上面那一层还在，我只是盖回来"。整屏滑入会让同一件事在两处有两种速度感。
- */
-private fun <T> folderSlideFor(
-    previous: T?,
-    next: T?,
-    distance: Float,
-): Animatable<Float, AnimationVector1D> = when {
-    previous == next -> Animatable(0f)
-    next != null -> Animatable(distance)
-    else -> Animatable(-distance / 3f)
 }
 
 /** 自动扫描的最小间隔：来回切页时不必每次都查一遍 MediaStore */
