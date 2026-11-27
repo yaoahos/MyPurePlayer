@@ -1,10 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  文件夹图形。画布即图形本身的包围盒（原始设计 56×45）。
+
+  比例几经反复，结论是**设计稿的 1.24:1 就是最好的**：
+  - 1.9:1（为满足「上左右留白相等且卡片高度等于视频卡」）：文件夹被压成一根横条；
+  - 1.39:1：往回走了一步，但仍然偏扁，图标顶部只剩 3dp 留白，贴得很紧；
+  - 1.24:1：标签与主体的高度比回到设计意图，形状最像文件夹。
+
+  卡片侧（MediaFolderGridCard）：图形区 1.38:1、图标上下留白 8 / 2dp。
+  卡片比视频卡高约 18dp，靠的是分组显示（本地 / SMB / 保险箱都不与视频卡同排）。
+  **这个文件只管形状，别再通过改比例去迁就卡片高度** —— 三个方向都试过了。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="64dp"
-    android:height="54dp"
-    android:viewportWidth="64"
-    android:viewportHeight="54">
+    android:width="56dp"
+    android:height="45dp"
+    android:viewportWidth="56"
+    android:viewportHeight="45">
     <path
-        android:pathData="M4,15C4,10.3 7.8,6.5 12.5,6.5H24.4C25.6,6.5 26.7,7 27.5,7.8L31,11.5H51.5C56.2,11.5 60,15.3 60,20V43C60,47.7 56.2,51.5 51.5,51.5H12.5C7.8,51.5 4,47.7 4,43V15Z"
+        android:pathData="M0,8.5C0,3.8 3.8,0 8.5,0H20.4C21.6,0 22.7,0.5 23.5,1.3L27,5H47.5C52.2,5 56,8.8 56,13.5V36.5C56,41.2 52.2,45 47.5,45H8.5C3.8,45 0,41.2 0,36.5V8.5Z"
         android:fillColor="#FFFFFF" />
 </vector>

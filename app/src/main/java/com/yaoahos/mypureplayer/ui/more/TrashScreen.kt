@@ -67,8 +67,6 @@ import com.yaoahos.mypureplayer.ui.components.EmptyState
 import com.yaoahos.mypureplayer.ui.components.InfoRow
 import com.yaoahos.mypureplayer.ui.components.ListRowContainer
 import com.yaoahos.mypureplayer.ui.components.ListSelection
-import com.yaoahos.mypureplayer.ui.components.MediaFolderGridCard
-import com.yaoahos.mypureplayer.ui.components.MediaFolderRow
 import com.yaoahos.mypureplayer.ui.components.PageMetrics
 import com.yaoahos.mypureplayer.ui.components.Notice
 import com.yaoahos.mypureplayer.ui.components.PageTopBar
@@ -94,12 +92,12 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 回收站：删除的本地视频 / 整个文件夹暂存在这里，可随时恢复；
+ * 回收站：删除的本地视频暂存在这里，可随时恢复；
  * 只有在这里再次删除才会真正抹掉。
  *
- * 「怎么删除的就怎么恢复」：删的是文件夹，这里就是一条文件夹记录，
- * 恢复时整目录搬回原位（目录名、内部文件都不变）；删的是单个视频，就是一条视频记录。
- * 所以列表不再把文件夹拆成 N 个视频 —— 那样恢复出来的只是散落的文件。
+ * 列表里**只有视频**：删除整个文件夹时，是把里面的视频逐个搬进来、各自记住原路径，
+ * 而不是为目录留一条「文件夹记录」。恢复时每个视频回到它原来所在的位置，
+ * 原目录不在了会按需重建 —— 结果和没删过一样，但这里不会出现点不开、不能播的条目。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -125,13 +123,11 @@ fun TrashScreen(navController: NavHostController) {
     val selectedEntries = remember(entries, selection.ids) {
         entries.filter { selection.contains(it.id.toString()) }
     }
-    // 文件夹没有播放进度；视频要有进度才允许清（历史里的 trash:<id> 或原路径的进度表）。
+    // 回收站里只有视频：有进度才允许清（历史里的 trash:<id> 或原路径的进度表）。
     val hasProgress = remember(selectedEntries, history, marks) {
         selectedEntries.any { entry ->
-            !entry.isFolder && (
-                history.any { it.videoId == "trash:${entry.id}" && it.positionMs > 0L } ||
-                    marks.any { it.key == entry.originalPath && it.positionMs > 0L }
-                )
+            history.any { it.videoId == "trash:${entry.id}" && it.positionMs > 0L } ||
+                marks.any { it.key == entry.originalPath && it.positionMs > 0L }
         }
     }
 
@@ -189,13 +185,23 @@ fun TrashScreen(navController: NavHostController) {
      * 读不到文件时把「原来在哪」整段换成原因，而不是在末尾追加 ——
      * 卡片宽度只够显示两行，追加的提示必然被省略号切掉，用户反而看不到。
      */
-    fun cardMeta(entry: TrashEntry): String = when {
-        unavailable(entry) && entry.isFolder ->
-            "存储卡未插入 · ${entry.fileCount} 个视频 · ${Formats.formatSize(entry.sizeBytes)}"
-        unavailable(entry) -> "存储卡未插入 · ${Formats.formatSize(entry.sizeBytes)}"
-        entry.isFolder -> folderSubtitle(entry)
-        else -> trashVideoMeta(entry)
-    }
+    fun cardMeta(entry: TrashEntry): String =
+        if (unavailable(entry)) "存储卡未插入 · ${Formats.formatSize(entry.sizeBytes)}"
+        else trashVideoMeta(entry)
+
+    /**
+     * 剩余保留天数角标。
+     *
+     * 两个条件同时成立才显示：自动清理开着（否则保留期不生效，写了就是空承诺），
+     * 且文件当前读得到（存储卡没插时卡片已经在报「存储卡未插入」，再挂一个天数
+     * 会让人以为这条快到期要删了 —— 实际它只是暂时读不到）。
+     */
+    fun retentionOf(entry: TrashEntry): Pair<String, Boolean>? =
+        if (appSettings.trashAutoClean && !unavailable(entry)) {
+            retentionBadge(entry, appSettings.trashRetentionDays)
+        } else {
+            null
+        }
 
     fun entryItem(entry: TrashEntry): VideoItem {
         val file = Graph.trash.fileOf(entry)
@@ -225,13 +231,10 @@ fun TrashScreen(navController: NavHostController) {
             selection.toggle(entry.id.toString())
         } else if (unavailable(entry)) {
             message = "存储卡未插入，插回后可播放或恢复"
-        } else if (!entry.isFolder) {
-            // 单击视频 = 播放（与本地/历史/保险箱一致）。先闪一下再跳播放器。
+        } else {
+            // 单击即播放（与本地/历史/保险箱一致）。先闪一下再跳播放器。
             // 回收站里的文件是完整搬到暂存区的，可直接播放，不必先恢复。
             flashClick { startPlayback(navController, entryItem(entry)) }
-        } else {
-            // 文件夹没法直接播放：单击进入选择态，用底部操作条恢复/删除。
-            selection.enter(entry.id.toString())
         }
     }
 
@@ -263,20 +266,19 @@ fun TrashScreen(navController: NavHostController) {
     fun restoreEntries(targets: List<TrashEntry>) {
         if (targets.isEmpty()) return
         launchUi {
-            var ok = 0
-            val failed = mutableListOf<String>()
             try {
-                targets.forEach { entry ->
-                    Graph.trash.restore(entry).fold(
-                        onSuccess = { ok++ },
-                        onFailure = { failed += it.message ?: entry.fileName },
-                    )
-                }
+                // 交给仓储层批量做：逐条调用的话，每条都要等媒体库回调、重扫本地库、
+                // 重写历史 —— 全选几十项恢复会串行等十几秒
+                val result = Graph.trash.restoreMany(targets)
                 Graph.local.scan()
                 message = when {
-                    failed.isEmpty() && ok == 1 -> "已恢复：${targets.first().fileName}"
-                    failed.isEmpty() -> "已恢复 $ok 项"
-                    else -> "已恢复 $ok 项，${failed.size} 项失败：${failed.first()}"
+                    result.failures.isEmpty() && result.restored == 1 ->
+                        "已恢复：${targets.first().fileName}"
+                    result.failures.isEmpty() -> "已恢复 ${result.restored} 项"
+                    result.restored == 0 ->
+                        "恢复失败：${result.failures.first().second}"
+                    else -> "已恢复 ${result.restored} 项，" +
+                        "${result.failures.size} 项失败：${result.failures.first().second}"
                 }
             } finally {
                 // 出错也要退出选择态：列表已经变了，底部栏再挂着旧勾选只会让人误操作
@@ -372,8 +374,8 @@ fun TrashScreen(navController: NavHostController) {
             if (selection.active) {
                 val single = selectedEntries.size == 1
                 val canAct = selectedEntries.isNotEmpty()
-                // 只有选中的是单个视频（文件夹不可播放）时才给出「播放」
-                val playableVideo = selectedEntries.singleOrNull()?.takeIf { !it.isFolder }
+                // 回收站里只有视频，单选即可播放
+                val playableVideo = selectedEntries.singleOrNull()
                 SelectionActionBar(
                     actions = listOf(
                         SelectionAction(Icons.Rounded.PlayArrow, "播放", enabled = playableVideo != null) {
@@ -398,7 +400,7 @@ fun TrashScreen(navController: NavHostController) {
                             "清除播放进度",
                             enabled = hasProgress,
                         ) {
-                            val videos = selectedEntries.filter { !it.isFolder }
+                            val videos = selectedEntries
                             val keys = videos.map { "trash:${it.id}" }
                             // 正在播的回收站视频仍在队列里，不挡住轮询会立刻写回历史
                             com.yaoahos.mypureplayer.playback.Playback.suppressProgressRewrite(keys)
@@ -443,7 +445,7 @@ fun TrashScreen(navController: NavHostController) {
                     message = if (query.isNotBlank()) {
                         "换个关键词试试。"
                     } else {
-                        "本地视频或文件夹删除后会先进入这里，可以恢复；在回收站内删除才会彻底移除。"
+                        "本地视频删除后会先进入这里，可以恢复；在回收站内删除才会彻底移除。"
                     },
                 )
                 return@Column
@@ -466,27 +468,18 @@ fun TrashScreen(navController: NavHostController) {
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(shown, key = { it.id }) { entry ->
-                        if (entry.isFolder) {
-                            MediaFolderGridCard(
-                                name = entry.fileName,
-                                subtitle = cardMeta(entry),
-                                onClick = { onEntryClick(entry) },
-                                onLongClick = { onEntryLongClick(entry) },
-                                selected = selection.contains(entry.id.toString()),
-                                selecting = selection.active,
-                                subtitleMaxLines = 2,
-                            )
-                        } else {
-                            VideoGridCard(
-                                item = entryItem(entry),
-                                onClick = { onEntryClick(entry) },
-                                onLongClick = { onEntryLongClick(entry) },
-                                selected = selection.contains(entry.id.toString()),
-                                selecting = selection.active,
-                                metaOverride = cardMeta(entry),
-                                metaMaxLines = 2,
-                            )
-                        }
+                        val badge = retentionOf(entry)
+                        VideoGridCard(
+                            item = entryItem(entry),
+                            onClick = { onEntryClick(entry) },
+                            onLongClick = { onEntryLongClick(entry) },
+                            selected = selection.contains(entry.id.toString()),
+                            selecting = selection.active,
+                            metaOverride = cardMeta(entry),
+                            metaMaxLines = 2,
+                            badgeText = badge?.first,
+                            badgeWarn = badge?.second ?: false,
+                        )
                     }
                 }
             } else {
@@ -503,28 +496,19 @@ fun TrashScreen(navController: NavHostController) {
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     items(shown, key = { it.id }) { entry ->
+                        val badge = retentionOf(entry)
                         ListRowContainer {
-                            if (entry.isFolder) {
-                                MediaFolderRow(
-                                    name = entry.fileName,
-                                    subtitle = cardMeta(entry),
-                                    onClick = { onEntryClick(entry) },
-                                    onLongClick = { onEntryLongClick(entry) },
-                                    selected = selection.contains(entry.id.toString()),
-                                    selecting = selection.active,
-                                    showSubtitle = true,
-                                )
-                            } else {
-                                VideoListRow(
-                                    item = entryItem(entry),
-                                    onClick = { onEntryClick(entry) },
-                                    onLongClick = { onEntryLongClick(entry) },
-                                    selected = selection.contains(entry.id.toString()),
-                                    selecting = selection.active,
-                                    metaOverride = cardMeta(entry),
-                                    metaMaxLines = 2,
-                                )
-                            }
+                            VideoListRow(
+                                item = entryItem(entry),
+                                onClick = { onEntryClick(entry) },
+                                onLongClick = { onEntryLongClick(entry) },
+                                selected = selection.contains(entry.id.toString()),
+                                selecting = selection.active,
+                                metaOverride = cardMeta(entry),
+                                metaMaxLines = 2,
+                                badgeText = badge?.first,
+                                badgeWarn = badge?.second ?: false,
+                            )
                         }
                     }
                 }
@@ -572,13 +556,9 @@ fun TrashScreen(navController: NavHostController) {
 
     deleteTarget?.let { targets ->
         ConfirmDialog(
-            title = if (targets.size == 1 && targets.first().isFolder) "彻底删除文件夹" else "彻底删除",
+            title = "彻底删除",
             message = if (targets.size == 1) {
-                if (targets.first().isFolder) {
-                    "「${targets.first().fileName}」以及里面的全部文件将被永久删除，无法恢复。"
-                } else {
-                    "「${targets.first().fileName}」将被永久删除，无法恢复。"
-                }
+                "「${targets.first().fileName}」将被永久删除，无法恢复。"
             } else {
                 "已选中的 ${targets.size} 项将被永久删除，无法恢复。"
             },
@@ -633,12 +613,27 @@ private fun trashVideoMeta(entry: TrashEntry): String = buildString {
     if (entry.durationMs > 0L) append(" · ${Formats.formatDuration(entry.durationMs)}")
 }
 
-/** 文件夹那一行/那一格的副标题：原位置 + 个数 + 大小 */
-private fun folderSubtitle(entry: TrashEntry): String = buildString {
-    append(trashLocation(entry))
-    if (entry.fileCount > 0) append(" · ${entry.fileCount} 个视频")
-    append(" · ")
-    append(Formats.formatSize(entry.sizeBytes))
+/** 一天的毫秒数，保留期按自然日算 */
+private const val DAY_MS = 24L * 3600_000L
+
+/**
+ * 缩略图左上角的保留期角标：还能在回收站里放几天。
+ *
+ * 只写「30天」「已超期」，不写「剩余」—— 卡片空间小，两个字换不来额外信息。
+ * 数字与「天」之间不留空格：角标是紧贴缩略图的一行小字，空格会让它显得松、还容易被折行。
+ *
+ * 显示的是**保留期**而不是「到期就删」的承诺：自动清理要求「超过保留天数
+ * 且总量超出阈值」两个条件同时成立才动手，只超天数不会被清。所以超期时说「已超期」，
+ * 不说「今天删除」——后者会让用户以为不腾空间也会丢文件。
+ *
+ * 剩余按自然日向上取整：删除后 23 小时显示「1天」，不会一删就变成 0 天。
+ */
+private fun retentionBadge(entry: TrashEntry, retentionDays: Int): Pair<String, Boolean>? {
+    if (retentionDays <= 0) return null
+    val left = entry.deletedAt + retentionDays * DAY_MS - System.currentTimeMillis()
+    if (left <= 0L) return "已超期" to true
+    val days = ((left + DAY_MS - 1) / DAY_MS).toInt()
+    return "${days}天" to (days <= 3)
 }
 
 /**
@@ -657,29 +652,20 @@ private fun TrashInfoDialog(entry: TrashEntry, onDismiss: () -> Unit) {
         modifier = Modifier.alertDialogGlassSurface(),
         tonalElevation = 0.dp,
         onDismissRequest = onDismiss,
-        title = { Text(if (entry.isFolder) "文件夹详情" else "视频详情") },
+        title = { Text("视频详情") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 InfoRow("名称", entry.fileName)
+                InfoRow("原位置", entry.originalPath.substringBeforeLast('/', ""), copyable = true)
                 InfoRow(
-                    "原位置",
-                    if (entry.isFolder) entry.originalPath
-                    else entry.originalPath.substringBeforeLast('/', ""),
-                    copyable = true,
+                    "时长",
+                    if (entry.durationMs > 0L) Formats.formatDuration(entry.durationMs) else "未知",
                 )
-                if (entry.isFolder) {
-                    InfoRow("视频", "${entry.fileCount} 个")
-                } else {
-                    InfoRow(
-                        "时长",
-                        if (entry.durationMs > 0L) Formats.formatDuration(entry.durationMs) else "未知",
-                    )
-                    InfoRow(
-                        "分辨率",
-                        if (entry.width > 0 && entry.height > 0) "${entry.width} × ${entry.height}"
-                        else "未知",
-                    )
-                }
+                InfoRow(
+                    "分辨率",
+                    if (entry.width > 0 && entry.height > 0) "${entry.width} × ${entry.height}"
+                    else "未知",
+                )
                 InfoRow("大小", Formats.formatSize(entry.sizeBytes))
                 InfoRow("删除时间", deletedAt)
             }

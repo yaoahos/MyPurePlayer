@@ -113,6 +113,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -152,6 +153,15 @@ import kotlin.math.roundToInt
 /** 手势过程中的居中 / 侧边提示 */
 /** 横向滑满一整屏对应的快进/快退时长，决定拖动时的手感 */
 private const val SEEK_SPAN_MS = 120_000f
+
+/**
+ * 控制条自动隐藏延时。
+ *
+ * 原为 4200ms：从弹出到收起只有四秒出头，点完一个按钮手指还没落到下一个上就淡出了。
+ * 延到 6 秒，并且每次在控制条上按下都会重新计时（见 controlsTick），
+ * 连续操作时只要手指还在控制条上，就不会在两次点击之间被收走。
+ */
+private const val CONTROLS_AUTO_HIDE_MS = 6_000L
 
 /** 手动旋转方向；null 表示按视频比例自动决定，按钮只在横屏 / 竖屏之间切换 */
 private enum class RotationMode { LANDSCAPE, PORTRAIT }
@@ -254,6 +264,11 @@ fun PlayerScreen(navController: NavHostController) {
     }
 
     var controlsVisible by remember { mutableStateOf(true) }
+    // 控制条上任意一次按下都让它 +1，用来重启自动隐藏倒计时。
+    // 只把 (controlsVisible / playing / locked) 当 key 是不够的：控制条显示期间
+    // 点多少次按钮都不会重启倒计时，于是「点完退出、想再点下一个」的那一刻，
+    // 控制条正好按最初显示的时刻收起——用户原话「经常点击按钮退出还想点下一个时就关闭了」。
+    var controlsTick by remember { mutableIntStateOf(0) }
     var locked by remember { mutableStateOf(false) }
     var showTracks by remember { mutableStateOf(false) }
     var trackTab by remember { mutableStateOf(0) } // 0 字幕 / 1 音轨
@@ -496,9 +511,9 @@ fun PlayerScreen(navController: NavHostController) {
         }
     }
 
-    LaunchedEffect(controlsVisible, state.playing, locked) {
+    LaunchedEffect(controlsVisible, state.playing, locked, controlsTick) {
         if (controlsVisible && state.playing && !locked) {
-            delay(4200)
+            delay(CONTROLS_AUTO_HIDE_MS)
             controlsVisible = false
         }
     }
@@ -837,6 +852,7 @@ fun PlayerScreen(navController: NavHostController) {
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .controlBarTouch { controlsTick++ }
                     .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)))
                     // 播放页是沉浸式全屏，系统栏在组合完成后才异步隐藏；若这里用
                     // statusBarsPadding()，第一帧会按仍是状态栏高度的 insets 把顶栏压下来，
@@ -973,6 +989,7 @@ fun PlayerScreen(navController: NavHostController) {
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .controlBarTouch { controlsTick++ }
                     .then(bottomBackground)
                     .navigationBarsPadding()
                     .padding(
@@ -998,9 +1015,11 @@ fun PlayerScreen(navController: NavHostController) {
                         },
                     )
                     BoxWithConstraints(
-                        // 高度收到 32dp：44dp 时手指区域比可视线条粗太多，
-                        // 观感上"刻度很高、线很细"，比例不协调
-                        Modifier.weight(1f).height(32.dp).padding(horizontal = 8.dp),
+                        // 触摸热区 44dp，可视线条仍然只有 6dp。
+                        // 原来 32dp：轨道本身 6dp，手指要精确落在它上下十几个像素里才接得住，
+                        // 落在旁边就会被判成"单击画面"把控制条收起。加高后上下各多 6dp，
+                        // 视觉比例没变（Canvas 与圆点都在 Box 内居中），点击效率明显提高。
+                        Modifier.weight(1f).height(44.dp).padding(horizontal = 8.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         // 轨道与进度自己画，不再用 LinearProgressIndicator。
@@ -1495,17 +1514,19 @@ fun PlayerScreen(navController: NavHostController) {
         }
     }
 
-    if (showInfo) {
-        state.item?.let { infoItem ->
-            PlayerInfoSheet(
-                item = infoItem,
-                landscape = landscape,
-                dynamicRange = state.dynamicRange,
-                audioOutput = state.audioOutput,
-                onDismiss = { showInfo = false },
-            )
-        }
-    }
+    // 信息面板与其它侧栏一样常驻组合、由 visible 驱动。
+    // 原来是 `if (showInfo) { PlayerSidePanel(visible = true) }`：首次组合时
+    // AnimatedVisibility 的初始值就是「已可见」，滑入动画一次都不播；关闭时整块从
+    // 组合里移除，滑出同样不播 —— 手感就是"啪地出现、啪地消失"，
+    // 与播放列表 / 字幕音轨 / 投屏 / 解码的右侧滑入对不上。
+    PlayerInfoSheet(
+        visible = showInfo,
+        item = state.item,
+        landscape = landscape,
+        dynamicRange = state.dynamicRange,
+        audioOutput = state.audioOutput,
+        onDismiss = { showInfo = false },
+    )
 
     // 网络字幕目录：作为播放页之上的浮层，不换路由、不改屏幕方向
     if (showNetSubs) {
@@ -1555,8 +1576,23 @@ private fun safeStreamUrl(item: VideoItem): String {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlayerInfoSheet(
-    item: VideoItem,
+    visible: Boolean,
+    item: VideoItem?,
     landscape: Boolean,
+    dynamicRange: String,
+    audioOutput: String,
+    onDismiss: () -> Unit,
+) {
+    // 横竖屏统一右侧滑入，不再一处底部面板、一处右侧侧栏
+    PlayerSidePanel(visible = visible, landscape = landscape, onDismiss = onDismiss) {
+        // 滑出动画还在播时 item 依然是这一条，内容不会先变空再滑走。
+        item?.let { InfoSheetBody(it, dynamicRange, audioOutput, onDismiss) }
+    }
+}
+
+@Composable
+private fun InfoSheetBody(
+    item: VideoItem,
     dynamicRange: String,
     audioOutput: String,
     onDismiss: () -> Unit,
@@ -1581,75 +1617,96 @@ private fun PlayerInfoSheet(
         MediaSource.SMB -> "网络共享 (SMB)"
         MediaSource.STREAM -> "网络串流"
     }
-    val infoContent: @Composable () -> Unit = {
-        val glass = playerGlass()
-        Column(
+    val glass = playerGlass()
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
+            .padding(horizontal = 18.dp)
+            .padding(top = 8.dp, bottom = 24.dp),
+    ) {
+        GlassPanelHeader(title = "视频详情", onClose = onDismiss)
+        Spacer(Modifier.height(12.dp))
+
+        // 标题本来就由文件名推导而来，两行都写会显得重复，信息面板只保留文件名
+        InfoItem("文件名", item.fileName.ifBlank { item.title })
+        InfoItem("来源", sourceText)
+        if (item.folderName.isNotBlank() && item.source == MediaSource.LOCAL) {
+            InfoItem("所在目录", item.folderName)
+        }
+        if (item.sizeBytes > 0L) InfoItem("大小", Formats.formatSize(item.sizeBytes))
+        if (duration > 0L) InfoItem("时长", Formats.formatDuration(duration))
+        if (item.width > 0 && item.height > 0) {
+            InfoItem("分辨率", "${item.width} × ${item.height}")
+        }
+        // 动态范围与声音输出方式来自实时解析出的 Format，不是列表项缓存：
+        // 起播后才会有值，解析不出来时整行不显示，不猜 SDR。
+        if (dynamicRange.isNotBlank()) InfoItem("画面", dynamicRange)
+        if (audioOutput.isNotBlank()) InfoItem("声音", audioOutput)
+
+        Spacer(Modifier.height(18.dp))
+        Text(
+            addressLabel,
+            style = MaterialTheme.typography.labelMedium,
+            color = glass.onGlassSecondary,
+        )
+        Spacer(Modifier.height(6.dp))
+        Box(
             Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .statusBarsPadding()
-                .padding(horizontal = 18.dp)
-                .padding(top = 8.dp, bottom = 24.dp),
-        ) {
-            GlassPanelHeader(title = "视频详情", onClose = onDismiss)
-            Spacer(Modifier.height(12.dp))
-
-            // 标题本来就由文件名推导而来，两行都写会显得重复，信息面板只保留文件名
-            InfoItem("文件名", item.fileName.ifBlank { item.title })
-            InfoItem("来源", sourceText)
-            if (item.folderName.isNotBlank() && item.source == MediaSource.LOCAL) {
-                InfoItem("所在目录", item.folderName)
-            }
-            if (item.sizeBytes > 0L) InfoItem("大小", Formats.formatSize(item.sizeBytes))
-            if (duration > 0L) InfoItem("时长", Formats.formatDuration(duration))
-            if (item.width > 0 && item.height > 0) {
-                InfoItem("分辨率", "${item.width} × ${item.height}")
-            }
-            // 动态范围与声音输出方式来自实时解析出的 Format，不是列表项缓存：
-            // 起播后才会有值，解析不出来时整行不显示，不猜 SDR。
-            if (dynamicRange.isNotBlank()) InfoItem("画面", dynamicRange)
-            if (audioOutput.isNotBlank()) InfoItem("声音", audioOutput)
-
-            Spacer(Modifier.height(18.dp))
-            Text(
-                addressLabel,
-                style = MaterialTheme.typography.labelMedium,
-                color = glass.onGlassSecondary,
-            )
-            Spacer(Modifier.height(6.dp))
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.White.copy(alpha = 0.07f))
-                    .border(1.dp, glass.divider, RoundedCornerShape(12.dp))
-                    .pointerInput(streamUrl) {
-                        detectTapGestures {
-                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            cm?.setPrimaryClip(ClipData.newPlainText(addressLabel, streamUrl))
-                            copied = true
-                        }
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White.copy(alpha = 0.07f))
+                .border(1.dp, glass.divider, RoundedCornerShape(12.dp))
+                .pointerInput(streamUrl) {
+                    detectTapGestures {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        cm?.setPrimaryClip(ClipData.newPlainText(addressLabel, streamUrl))
+                        copied = true
                     }
-                    .padding(12.dp),
-            ) {
-                Text(
-                    streamUrl.ifBlank { "—" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = glass.onGlass,
-                )
-            }
-            Spacer(Modifier.height(6.dp))
+                }
+                .padding(12.dp),
+        ) {
             Text(
-                if (copied) "已复制到剪贴板" else "点击地址可复制",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (copied) glass.accent else glass.onGlassSecondary,
+                streamUrl.ifBlank { "—" },
+                style = MaterialTheme.typography.bodySmall,
+                color = glass.onGlass,
             )
         }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            if (copied) "已复制到剪贴板" else "点击地址可复制",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (copied) glass.accent else glass.onGlassSecondary,
+        )
     }
-    // 横竖屏统一右侧滑入，不再一处底部面板、一处右侧侧栏
-    PlayerSidePanel(visible = true, landscape = landscape, onDismiss = onDismiss) {
-        infoContent()
-    }
+}
+
+/**
+ * 控制条触摸壳：顶栏 / 底栏自己吃掉点击，同时让任意一次按下都重启自动隐藏倒计时。
+ *
+ * 两件事必须一起做，少一件就会互相抵消：
+ *  1) 用 Initial pass 旁路观察按下（不消费）——按钮、滑块照常工作，但每一次按下
+ *     都会把 controlsTick 推一格，倒计时重新开始；
+ *  2) 用 clickable 吃掉**没有被内层消费**的点击。此前底栏只是一个普通 Column，
+ *     点在进度条上下那一条空白处时事件一路穿到下面覆盖全屏的手势层，被判成
+ *     「单击画面」，控制条立刻收起 —— 这就是「点进度条附近很容易误触」的根因，
+ *     并不是点了下面那排按钮。
+ */
+@Composable
+private fun Modifier.controlBarTouch(onTouch: () -> Unit): Modifier {
+    return this
+        .pointerInput(Unit) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                onTouch()
+            }
+        }
+        // 用 detectTapGestures 而不是 clickable：只负责吞掉点击，不额外造一个
+        // "可点击按钮"的无障碍节点（整条控制条被读成一个按钮没有意义）。
+        .pointerInput(Unit) {
+            detectTapGestures { }
+        }
 }
 
 @Composable

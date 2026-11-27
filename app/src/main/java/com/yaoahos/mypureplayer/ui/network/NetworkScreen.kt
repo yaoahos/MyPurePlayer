@@ -586,14 +586,12 @@ private fun ServerCard(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = buildString {
-                        // displayHost 已包含「主机/共享目录」，这里只再补账号
-                        append(server.displayHost)
-                        if (server.username.isNotBlank()) append(" · ${server.username}")
-                    },
+                    // 只报地址与共享目录。账号属于登录信息，摆在列表上等于把它当公告展示，
+                    // 而且它不能帮用户区分位置（同一台机器换账号也还是同一个位置）。
+                    text = server.displayHost,
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    // 窄屏给两行：地址、共享目录、账号都能看全，不再被一行省略号截断
+                    // 窄屏给两行：地址与共享目录都能看全，不再被一行省略号截断
                     maxLines = if (compact) 2 else 1,
                     overflow = TextOverflow.Ellipsis,
                 )

@@ -1037,7 +1037,7 @@ fun LocalScreen(
     pendingFolderDelete?.let { group ->
         ConfirmDialog(
             title = "删除文件夹里的视频",
-            message = "「${group.name}」里的 ${group.videos.size} 个视频会移入回收站，可以在「更多 → 回收站」整体恢复。" +
+            message = "「${group.name}」里的 ${group.videos.size} 个视频会移入回收站，可以在「更多 → 回收站」恢复（支持多选）。" +
                 "文件夹里的其它文件（字幕、图片等）留在原处不动。",
             confirmText = "移入回收站",
             destructive = true,
@@ -1055,19 +1055,19 @@ fun LocalScreen(
                             "文件夹里的视频已不在原位置，列表已刷新"
                         } else {
                             // 只搬视频、不搬目录：目录里往往还混着字幕/封面等非视频文件，
-                            // 整体搬走等于把它们一起删了。回收站里会建一个同名文件夹装这些视频，
-                            // 全部搬完之后原目录若已空，才把它删掉。
-                            Graph.trash.moveFolderToTrash(
-                                videos = fresh.videos,
-                                sizeBytes = fresh.videos.sumOf { it.sizeBytes },
-                            ).fold(
-                                onSuccess = {
-                                    // 只清真正搬走的那些（部分失败时留在原处的仍可继续看）
-                                    Graph.forgetGone(fresh.videos)
-                                    "已把「${fresh.name}」里的 ${fresh.videos.size} 个视频移入回收站"
-                                },
-                                onFailure = { it.message ?: "删除失败" },
-                            )
+                            // 整体搬走等于把它们一起删了。搬空之后原目录若已空，才把它删掉。
+                            // 回收站里是**一条条视频**（不是一条文件夹记录），恢复时各自回原位。
+                            val result = Graph.trash.moveFolderToTrash(fresh.videos)
+                            // 只清真正搬走的那些（部分失败时留在原处的仍可继续看）
+                            val movedPaths = result.moved.mapTo(HashSet()) { it.originalPath }
+                            Graph.forgetGone(fresh.videos.filter { it.localPath in movedPaths })
+                            val failed = fresh.videos.size - result.moved.size
+                            when {
+                                result.moved.isEmpty() -> result.firstError ?: "删除失败"
+                                failed > 0 -> "已移入回收站 ${result.moved.size} 个，" +
+                                    "$failed 个失败：${result.firstError ?: "请检查存储权限"}"
+                                else -> "已把「${fresh.name}」里的 ${result.moved.size} 个视频移入回收站"
+                            }
                         }
                     }
                 }

@@ -12,11 +12,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -61,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.yaoahos.mypureplayer.R
 import com.yaoahos.mypureplayer.core.Formats
 import com.yaoahos.mypureplayer.data.Graph
@@ -363,6 +366,43 @@ fun SelectionBadge(
 }
 
 /**
+ * 缩略图左上角的文字角标（回收站里显示保留天数）。
+ *
+ * 不加底色，只靠白字 + 一层暗色投影压在画面上。缩略图内容不可控，纯白字遇到亮画面会糊掉，
+ * 投影是让它在任何画面上都能读出来的最小手段 —— 比半透明底板轻，也不挡画面。
+ */
+@Composable
+fun MediaCornerBadge(
+    text: String,
+    warn: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    // Shadow 的 blurRadius / offset 是**像素**，不是 dp：写死 3f 在 3x 屏上只有 1dp 模糊，
+    // 投影贴得死死的，亮画面上糊不开。按密度换算成 2dp 模糊 + 0.5dp 下移，
+    // 各密度下都是同一层柔光。
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val blur = with(density) { 2.dp.toPx() }
+    val lift = with(density) { 0.5.dp.toPx() }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium.copy(
+            shadow = androidx.compose.ui.graphics.Shadow(
+                color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.8f),
+                offset = androidx.compose.ui.geometry.Offset(0f, lift),
+                blurRadius = blur,
+            ),
+        ),
+        color = if (warn) {
+            androidx.compose.ui.graphics.Color(0xFFFFB74D)
+        } else {
+            androidx.compose.ui.graphics.Color.White
+        },
+        maxLines = 1,
+        modifier = modifier,
+    )
+}
+
+/**
  * 多选态的卡片边界：选中 = 2dp 主题色描边 + 主题色薄纱；
  * 未选中但处于多选态 = 1dp 次级描边。底材沿用玻璃卡，不退化成一块纯色板。
  */
@@ -577,6 +617,9 @@ fun VideoGridCard(
     /** 回收站等页面需要显示原位置等信息时传入；不传则沿用全站统一的「时长 · 大小」。 */
     metaOverride: String? = null,
     metaMaxLines: Int = 1,
+    /** 缩略图左上角的角标（回收站：剩余保留天数）；为 null 时不绘制。 */
+    badgeText: String? = null,
+    badgeWarn: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectPressedWithTap()
@@ -608,6 +651,10 @@ fun VideoGridCard(
                     .aspectRatio(16f / 9f),
             ) {
                 VideoThumb(item, Modifier.fillMaxSize(), cornerRadius = 0.dp, roundedTop = true)
+                badgeText?.let {
+                    // 8dp：缩略图上沿是圆角，贴 6dp 时角标右下角会压到圆弧外的空白
+                    MediaCornerBadge(it, badgeWarn, Modifier.align(Alignment.TopStart).padding(8.dp))
+                }
                 SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
             }
             Column(
@@ -679,6 +726,9 @@ fun VideoListRow(
     focused: Boolean = false,
     metaOverride: String? = null,
     metaMaxLines: Int = 1,
+    /** 缩略图左上角的角标（回收站：剩余保留天数）；为 null 时不绘制。 */
+    badgeText: String? = null,
+    badgeWarn: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectPressedWithTap()
@@ -701,6 +751,10 @@ fun VideoListRow(
     ) {
         Box(Modifier.size(width = 132.dp, height = 76.dp)) {
             VideoThumb(item, Modifier.fillMaxSize(), cornerRadius = 14.dp)
+            badgeText?.let {
+                // 行内缩略图是 14dp 圆角，4dp 会落到圆弧上；8dp 才落在直角区
+                MediaCornerBadge(it, badgeWarn, Modifier.align(Alignment.TopStart).padding(8.dp))
+            }
             SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(4.dp))
         }
         Column(
@@ -837,10 +891,14 @@ fun rememberMediaDuration(item: VideoItem): Long {
  * 文件夹图形：只画图形本身，底色与圆角由外面的卡片统一决定。
  *
  * 颜色用主色的柔和版本（primary 的 82% 不透明度），和视频缩略图的照片放在一起时
- * 不会因为一块高饱和实心色跳到眼前。
+ * 不会因为一块高饱和实心色跳在眼前。
+ *
+ * 尺寸完全交给调用方：[modifier] 定宽度，本函数按 [FOLDER_ART_RATIO] 推出高度。
+ * 图形画布已经在 `folder_card.xml` 里收到包围盒，所以这里拿到的矩形就是
+ * **看得见的那个矩形**，卡片边距可以直接按它算，不用再减去图形内部留白。
  */
 @Composable
-private fun FolderArtwork(fraction: Float = 0f, fixed: Dp? = null) {
+private fun FolderArtwork(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.82f)
     // 矢量图标先栅格化再画。
@@ -848,27 +906,38 @@ private fun FolderArtwork(fraction: Float = 0f, fixed: Dp? = null) {
     // 一个目录里三十多个文件夹卡片时，每张卡都要在离屏层里重画一遍矢量路径，
     // 首次进入要 100ms 以上一帧。同一 tint 的图标在所有卡上是完全一样的，
     // 所以只栅格化一次（512px 足够任何卡片尺寸）、之后所有卡片共享同一张位图，
-    // 绘制退化成一次 drawImage。尺寸由 layout 修饰器按容器宽度算，不子组合。
+    // 绘制退化成一次 drawImage。
     val bitmap = remember(tint) { folderArtBitmap(context, FOLDER_ART_PX, tint) }
-    val sizeModifier = fixed?.let { Modifier.size(it) }
-        ?: Modifier.iconSized(fraction, min = 42.dp, max = 130.dp)
+    val artModifier = modifier.aspectRatio(FOLDER_ART_RATIO)
     if (bitmap != null) {
         Image(
             bitmap = bitmap,
             contentDescription = null,
-            modifier = sizeModifier,
+            modifier = artModifier,
+            // 位图本身已是 57:41，FillBounds 只是避免亚像素误差在边缘留一条缝
+            contentScale = ContentScale.FillBounds,
         )
     } else {
         Icon(
             painter = painterResource(R.drawable.folder_card),
             contentDescription = null,
             tint = tint,
-            modifier = sizeModifier,
+            modifier = artModifier,
         )
     }
 }
 
-/** 文件夹图标预渲染边长；卡片最宽约 130dp（大平板），按 3x 密度留足余量 */
+/**
+ * 文件夹图形的宽高比，与 `folder_card.xml` 的画布一致（56:45）。
+ *
+ * 就是设计稿原比例。卡片高度锁死在视频卡尺寸时，为了让宽度铺满，图形被压到 1.9:1，
+ * 文件夹成了一根横条；往回走到 1.39:1 仍然偏扁、顶部留白只剩 3dp。
+ * 现在卡片允许比视频卡高一点，比例回到 1.24:1，标签与主体的关系才是设计意图。
+ */
+private const val FOLDER_ART_RATIO = 56f / 45f
+private const val FOLDER_ART_RATIO_H = 45f / 56f
+
+/** 文件夹图标预渲染宽度；卡片最宽约 180dp（大平板），按 3x 密度留足余量 */
 private const val FOLDER_ART_PX = 512
 
 /** 文件夹图标位图缓存：key = 尺寸 + 颜色，条目极少（同一列表里所有卡共用一张） */
@@ -885,8 +954,11 @@ private fun folderArtBitmap(
         val drawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.folder_card)
             ?: return null
         androidx.core.graphics.drawable.DrawableCompat.setTint(drawable, tint.toArgb())
-        drawable.setBounds(0, 0, px, px)
-        val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
+        // 按图形自己的比例栅格化。原先塞进 px×px 的方形 bounds，VectorDrawable 会把
+        // 非等比拉到正方形，文件夹因此显得又方又窄。
+        val h = (px * FOLDER_ART_RATIO_H).toInt().coerceAtLeast(1)
+        drawable.setBounds(0, 0, px, h)
+        val bmp = android.graphics.Bitmap.createBitmap(px, h, android.graphics.Bitmap.Config.ARGB_8888)
         drawable.draw(android.graphics.Canvas(bmp))
         bmp.asImageBitmap().also { folderArtCache.put(key, it) }
     }.getOrNull()
@@ -902,7 +974,6 @@ fun MediaFolderGridCard(
     onLongClick: (() -> Unit)? = null,
     selected: Boolean = false,
     selecting: Boolean = false,
-    subtitleMaxLines: Int = 1,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectPressedWithTap()
@@ -910,9 +981,14 @@ fun MediaFolderGridCard(
     // 这里原来用 BoxWithConstraints 取 maxWidth 来决定图标尺寸与字号。
     // 它是 SubcomposeLayout：每张卡都要在**离屏图层内**再跑一次子组合，
     // 一屏三十多个文件夹卡片时，进入目录的首次绘制实测要 147ms 一帧。
-    // 字号按屏幕宽度分档（与 adaptiveMediaGridMinSize 的档位一致），
-    // 图标尺寸交给 layout 修改器按实际宽度算 —— 纯测量，不再子组合。
+    // 现在字号按屏幕宽度分档（与 adaptiveMediaGridMinSize 的档位一致），
+    // 图标只给 `fillMaxWidth + aspectRatio` —— 纯测量，不做子组合。
     val compact = LocalConfiguration.current.screenWidthDp < 480
+    // 文字区左右与底部的内边距，取视频卡文字区的同一个值（5dp），两套卡的标题左边缘才对得齐。
+    // 顺带说明：两张卡**并不同高**（文件夹卡多出图形区那一截），所以它们只以「分组」形式出现，
+    // 本地 / SMB / 保险箱都是先「文件夹」段再「视频」段，不会同排；
+    // 回收站曾经混排，现在只有视频。
+    val gap = 5.dp
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -928,44 +1004,60 @@ fun MediaFolderGridCard(
             ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // 图形区与缩略图同尺寸：图标铺满这一块，卡片边界即内容边界
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f),
-            contentAlignment = Alignment.Center,
-        ) {
-            // 直接展示文件夹图标，不加灰白色背景块去扩充成卡片形状
-            FolderArtwork(fraction = 0.72f)
+        // 图形区 1.38:1：比上一版（1.45）略高，图标因此再放大 8%（107.5×86.4 → 116.1×93.3dp）。
+        // **56:45 这个比例本身不动** —— 它是标签与主体的高度关系，变了就不像文件夹。
+        // 想再大只能继续抬图形区，代价是卡片变高。
+        //
+        // 图标按高度撑满，宽度由 56:45 推出，水平居中。
+        // 上下留白**故意不等**：上 8、下 2。图标整体下坐，把空间让给「图形 ↔ 标题」这一段，
+        // 否则 5/5 的居中留白 + 文字区 5dp 内边距 + 标题行盒 1.5dp 留白，
+        // 图形底边到标题墨迹要空 11.5dp，卡片下半截散开（用户：「下移一点，行距更短、更紧凑」）。
+        // 现在这一段 6.5dp，与「数量 ↔ 卡底」的 6.5dp 相等，卡片上下重心才稳。
+        // 上 8dp 是「不贴顶」的安全值：3dp 那次用户的原话是「离顶部也近了一点」，别再下探。
+        Box(Modifier.fillMaxWidth().aspectRatio(1.38f)) {
+            FolderArtwork(
+                Modifier
+                    .align(Alignment.Center)
+                    .fillMaxHeight()
+                    .padding(top = 8.dp, bottom = 2.dp),
+            )
             SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
         }
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 5.dp, vertical = 5.dp),
+                // 上边距 3dp 而不是 gap(=5)：图标已经下坐 3dp，这段再留 5dp 就是双重留白。
+                // 下边距保持 5dp，与「数量 ↔ 卡底」的 6.5dp 对齐。
+                .padding(horizontal = gap)
+                .padding(top = 3.dp, bottom = gap),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // 标题固定单行并占固定高度，保证长短名称的卡片高度完全一致。
+            //
+            // 行高跟着行盒一起收：原来 18dp 盒配 20sp 行高，墨迹上下各留 3dp、
+            // 两行字之间空 4.5dp，卡片下半截看着松散（用户：「文字之间的行距缩小一点」）。
+            // 现在标题 17dp 盒 + 17sp 行高、数量行 14sp，两行墨迹之间空 3dp。
             Text(
                 name,
-                style = if (compact) {
+                style = (if (compact) {
                     MaterialTheme.typography.labelMedium
                 } else {
                     MaterialTheme.typography.titleSmall
-                },
+                }).copy(lineHeight = 17.sp),
                 textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().height(18.dp),
+                modifier = Modifier.fillMaxWidth().height(17.dp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-                if (subtitle.isNotBlank()) {
+            if (subtitle.isNotBlank()) {
                 Text(
                     subtitle,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelSmall.copy(lineHeight = 14.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
-                    maxLines = subtitleMaxLines,
+                    // 数量/位置都是短文本，恒单行：卡片高度靠它固定，多行会把同排卡片撑不齐
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1010,7 +1102,7 @@ fun MediaFolderRow(
                 .size(width = 132.dp, height = 76.dp),
             contentAlignment = Alignment.Center,
         ) {
-            FolderArtwork(fixed = 64.dp)
+            FolderArtwork(Modifier.width(84.dp))
             SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(4.dp))
         }
         // 列表行只保留单行标题：与左侧图标严格垂直居中齐平。

@@ -348,10 +348,8 @@ fun Modifier.glassPageBackground(): Modifier {
     val top = if (dark) cs.surface else cs.background
     val bottom = pageGradientBottom(cs)
     val white = if (dark) 0.03f else 0.34f
-    val sideAlpha = if (dark) 0.09f else 0.050f
-    val primary = cs.primary
 
-    // 把「底色竖向渐变 + 顶部薄白 + 横向主题色薄纱」预渲染成一张 64×256 的小图。
+    // 把「底色竖向渐变 + 顶部薄白」预渲染成一张 1×1024 的小图。
     //
     // 为什么不用 Brush 直接画：这是**每帧**都要执行的整屏着色。原来两条 Brush 各自
     // 是一遍整屏渐变（1080×2340 = 250 万像素的逐像素着色 + 一次透明度混合），
@@ -360,11 +358,17 @@ fun Modifier.glassPageBackground(): Modifier {
     //    换成单色 → GPU 90 分位 10ms、整帧 90 分位 18ms
     // 也就是说这两遍渐变一个人就吃掉了十几毫秒，是"从设置/历史返回更多卡顿"的真凶。
     //
-    // 渐变本身是线性的，用 64×256 采样 + 双线性放大能**逐像素还原**原样（线性插值
-    // 还原线性渐变，误差只来自 8bit 量化），而绘制侧从"逐像素算渐变"降级成
-    // "一次纹理采样" —— 64KB 的贴图，比整屏渐变便宜一个数量级。
-    val backdrop = androidx.compose.runtime.remember(top, bottom, white, sideAlpha, primary) {
-        renderPageBackdrop(top, bottom, white, sideAlpha, primary)
+    // **横向那层主题色薄纱已经删掉**（2026-11-27）。它是一条 0 → 48% → 0 的水平渐变，
+    // 强度 0.09，落在深色底上总共只值 11 级色阶；贴图横向只有 64 个采样点，放大到
+    // 1440 宽后每一级色阶变成 55~70px 宽的竖直色带 —— 深色背景下就是「很多竖纹」，
+    // 用户原话「深色背景貌似不太干净，有很多竖纹」。
+    //
+    // 想保留它只有两条路，都不划算：贴图做到接近屏幕像素宽（>1MB，且每个页面一份）；
+    // 或者放弃预渲染改回逐帧整屏渐变（转场性能倒退回上面那组数字）。而这层薄纱本身
+    // 只值几个色阶，深色下根本指不出它在哪 —— 删掉是唯一干净的解。
+    // 竖向渐变保留，页面"上亮下沉"的层次感不受影响。
+    val backdrop = androidx.compose.runtime.remember(top, bottom, white) {
+        renderPageBackdrop(top, bottom, white)
     }
     return this
         // layer 放在最前面：让背景也一起进入图层，转场时整页（含背景）只是被移动。
@@ -381,7 +385,7 @@ fun Modifier.glassPageBackground(): Modifier {
                     size.width.toInt().coerceAtLeast(1),
                     size.height.toInt().coerceAtLeast(1),
                 ),
-                // 双线性：放大的是一张只有 64×256 的线性渐变，插值后与原渐变一致
+                // 双线性：放大的是一张 1×1024 的纯竖向线性渐变，横向没有可插值的结构
                 filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
             )
         }
@@ -418,10 +422,11 @@ fun Modifier.appDialogSurface(
     else mixToLuminance(cs.background, colorTint, 0.866f)
     // 受光只压顶部一段（22% 内衰减到 0），不再整片泛白 —— 整片白就是"白纸"的来源
     val topLight = if (dark) 0.11f else 0.20f
-    val sideAlpha = if (dark) 0.11f else 0.060f
     val glass = appGlass()
-    val tile = androidx.compose.runtime.remember(top, bottom, topLight, sideAlpha, cs.primary) {
-        renderDialogBackdrop(top, bottom, topLight, sideAlpha, cs.primary)
+    // 横向薄纱同样已移除（原因见 glassPageBackground）：弹窗宽度虽小一些，
+    // 但 64 列拉伸到 900~1800px 一样是十几~二十几像素一档的竖带。
+    val tile = androidx.compose.runtime.remember(top, bottom, topLight) {
+        renderDialogBackdrop(top, bottom, topLight)
     }
     return this
         .shadow(
@@ -471,20 +476,23 @@ fun Modifier.alertDialogGlassSurface(
 }
 
 /**
- * 页面底色回退：把渐变的几档颜色按 64×256 画进一张小图。
+ * 页面底色回退：把渐变的几档颜色按 1×1024 画进一张小图。
  *
- * 采样点与原 [Brush] 版一模一样（0 / 18% / 32% / 45% / 100%），横向薄纱也是
- * 同一条 0 → 48% → 100% 的透明度曲线，所以这里**不是近似**，是同一张图换了个画法。
+ * 宽度取 1：整张图只有竖向渐变，横向没有任何结构，拉伸到任意宽度都不会出现色带。
+ * （横向主题色薄纱已移除，原因见 [glassPageBackground]。）
+ *
+ * 高度取 1024 而不是 256：深色底的竖向渐变总级差只有几级，行数太少时每级色阶
+ * 会摊成几百像素高的横带。1 像素宽的图每多一行只多 4 字节，1024 行也只有 4KB。
+ *
+ * 采样点与原 [Brush] 版一模一样（0 / 18% / 32% / 45% / 100%），所以这里**不是近似**。
  */
 private fun renderPageBackdrop(
     top: Color,
     bottom: Color,
     white: Float,
-    sideAlpha: Float,
-    primary: Color,
 ): androidx.compose.ui.graphics.ImageBitmap {
-    val w = 64
-    val h = 256
+    val w = 1
+    val h = 1024
     val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
     val paint = android.graphics.Paint()
@@ -510,34 +518,26 @@ private fun renderPageBackdrop(
     )
     canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
 
-    paint.shader = android.graphics.LinearGradient(
-        0f, 0f, w.toFloat(), 0f,
-        intArrayOf(0, primary.copy(alpha = sideAlpha).toArgb(), 0),
-        floatArrayOf(0f, 0.48f, 1f),
-        android.graphics.Shader.TileMode.CLAMP,
-    )
-    canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
-
     return bmp.asImageBitmap()
 }
 
 /**
- * 弹窗面板的贴图：上沿受光，22% 内就衰减到零，下半段回到平色，再压一层主题色横向薄纱。
+ * 弹窗面板的贴图：上沿受光，22% 内就衰减到零，下半段回到平色。
  *
  * 与 [renderPageBackdrop] 唯一的差别是**受光只占顶部一小段**。页面是整屏大面积，
  * 顶部薄白不能有可见边界（否则像贴了一条白带）；弹窗只占屏幕几分之一，受光必须有落差，
  * 才读得成「一块有厚度的玻璃片」。这也是弹窗不再是白纸的关键：明暗差集中在顶部一圈，
  * 配合上白下暗的描边，眼睛看到的是折边，不是填色。
+ *
+ * 宽度同样取 1：横向主题色薄纱已移除，原因见 [glassPageBackground]。
  */
 private fun renderDialogBackdrop(
     top: Color,
     bottom: Color,
     topLight: Float,
-    sideAlpha: Float,
-    primary: Color,
 ): androidx.compose.ui.graphics.ImageBitmap {
-    val w = 64
-    val h = 256
+    val w = 1
+    val h = 512
     val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
     val paint = android.graphics.Paint()
@@ -559,14 +559,6 @@ private fun renderDialogBackdrop(
             bottom.toArgb(),
         ),
         floatArrayOf(0f, 0.10f, 0.22f, 0.34f, 1f),
-        android.graphics.Shader.TileMode.CLAMP,
-    )
-    canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
-
-    paint.shader = android.graphics.LinearGradient(
-        0f, 0f, w.toFloat(), 0f,
-        intArrayOf(0, primary.copy(alpha = sideAlpha).toArgb(), 0),
-        floatArrayOf(0f, 0.48f, 1f),
         android.graphics.Shader.TileMode.CLAMP,
     )
     canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
@@ -622,22 +614,30 @@ fun Modifier.appGlassSurface(
     }
     // 光从上面来：片体顶端受光、向下渐暗。
     // 一块**单一色值**的半透明矩形不管多透明都像塑料片；玻璃之所以像玻璃，
-    // 是因为片体自身的亮度不是均匀的 —— 上沿亮、下沿沉，中间还有一道斜光。
+    // 是因为片体自身的亮度不是均匀的 —— 上沿亮、下沿沉。
     val topLight = if (glass.isDark) 0.11f else 0.16f
     val bottomLight = if (glass.isDark) 0.03f else 0.05f
 
-    // 面色 + 竖向受光 + 斜向高光，合成一张 96×96 的小图再缩放铺满卡片。
+    // 面色 + 竖向受光，合成一张 **1×256** 的小图再缩放铺满卡片。
     //
     // 原来这里是三层 `background`：一层实色、两遍整卡面积的渐变混合。单张卡片看不出来，
     // 但设置页 / 关于页是"整页都是卡片"，加起来等于每帧多刷两张全屏渐变 ——
     // 页背景改成预渲染贴图之后，这几层就成了剩下的主要开销（返回设置 26ms vs 返回历史 17ms，
     // 差别就是卡片数量）。
     //
-    // 卡片上的三种光感都是**相对自身范围**的线性渐变，所以同一张 96×96 的图
-    // 拉伸到任意卡片尺寸都成立，双线性插值能还原线性渐变。
-    val diagonalLight = if (glass.isDark) 0.07f else 0.13f
+    // 只留竖向这一层，斜向高光已删（原来是 96×96 里一道左上→右下的 45° 白纱，深色 0.07 / 浅色 0.13）。
+    //
+    // 理由不是"它很显眼"，而是它与竖向那层**没法用同一种画法消掉**：
+    // 竖向光只沿 y 走，贴图可以压到 1 像素宽，横向必然均匀；
+    // 斜光沿对角线走，必须二维贴图，而 8bit 只有 255 级 alpha，
+    // 0.07 摊成 18 级色阶、落在卡片对角线上（1020×270 的卡片对角线约 1055px），
+    // 就是 17 条法向宽约 59px、每级差 1 个亮度码的 45° 斜带 —— 幅度低、但在纯色卡面上
+    // 正好是「看不出是什么、只觉得不干净」的那一类伪影，和页底那排竖纹同源。
+    // 它本来只值 1 个亮度码的观感，删掉后肉眼几乎无差，玻璃感靠上下明暗差 + 描边继续表达。
+    //
+    // 顺带：贴图从 96×96×4B = 36KB 降到 1×256×4B = 1KB，24 条 LRU 从 864KB 降到 24KB。
     val tile = androidx.compose.runtime.remember(fill, glass.isDark, topLight, bottomLight) {
-        cachedSurfaceTile(fill, topLight, bottomLight, diagonalLight)
+        cachedSurfaceTile(fill, topLight, bottomLight)
     }
 
     return this
@@ -674,10 +674,10 @@ fun Modifier.appGlassSurface(
 /**
  * 同配色的贴图只生成一次，全站共享。
  *
- * 原来每张卡片在自己的 `remember` 里各渲染一张 96×96：设置页二十来行、更多页七行、
+ * 原来每张卡片在自己的 `remember` 里各渲染一张：设置页二十来行、更多页七行、
  * 配置备份四组、播放列表每行一张 —— 进页面那一帧要连着做二十多次 Bitmap 分配
  * 加 Canvas 绘制。贴图是只读的，多个节点画同一张 Bitmap 完全安全，
- * 所以按「面色 + 三档光」共享一份即可。
+ * 所以按「面色 + 两档光」共享一份即可。
  *
  * 容量 24：同一屏上真正不同的配色只有几种（页面卡片、弹窗选项条、选中态、深色一套），
  * 动态取色换主题时旧条目被 LRU 自然淘汰。
@@ -689,28 +689,31 @@ private fun cachedSurfaceTile(
     fill: Color,
     topLight: Float,
     bottomLight: Float,
-    diagonalLight: Float,
 ): androidx.compose.ui.graphics.ImageBitmap {
-    val key = "${fill.value}|$topLight|$bottomLight|$diagonalLight"
+    val key = "${fill.value}|$topLight|$bottomLight"
     surfaceTiles.get(key)?.let { return it }
-    return renderSurfaceTile(fill, topLight, bottomLight, diagonalLight)
+    return renderSurfaceTile(fill, topLight, bottomLight)
         .also { surfaceTiles.put(key, it) }
 }
 
 /**
- * 卡片面色：三层光感按 96×96 预渲染（竖向受光 + 斜向高光），与原来三支 Brush 同值。
+ * 卡片面色：面色 + 一层竖向受光，按 **1×256** 预渲染。
+ *
+ * 为什么宽度只有 1 像素：整张图横向是同一个颜色，拉伸到任意卡片宽度都不产生任何横向结构
+ * （页面底色、弹窗面板是同一个理由 —— 见 [renderPageBackdrop]）。
+ * 高度取 256：竖向渐变在 8bit 下的台阶宽度 = 卡片像素高 ÷ 色阶数，与贴图行数无关，
+ * 但行数高于卡片高度太多时缩小采样会丢色阶、低于卡片高度太多时放大又会糊掉端点亮度，
+ * 256 行覆盖常见卡片高度（列表行 180px 到宫格卡 600px）两头都不吃亏。
  */
 private fun renderSurfaceTile(
     fill: Color,
     topLight: Float,
     bottomLight: Float,
-    diagonalLight: Float,
 ): androidx.compose.ui.graphics.ImageBitmap {
-    val n = 96
-    val bmp = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888)
+    val h = 256
+    val bmp = android.graphics.Bitmap.createBitmap(1, h, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
     val paint = android.graphics.Paint()
-    val f = n.toFloat()
 
     // ① 面色
     canvas.drawColor(fill.toArgb())
@@ -718,22 +721,12 @@ private fun renderSurfaceTile(
     // ② 竖向光感：上亮下暗（0 → 30% → 100%）
     fun white(a: Float): Int = Color.White.copy(alpha = a.coerceIn(0f, 1f)).toArgb()
     paint.shader = android.graphics.LinearGradient(
-        0f, 0f, 0f, f,
+        0f, 0f, 0f, h.toFloat(),
         intArrayOf(white(topLight), white(bottomLight), 0),
         floatArrayOf(0f, 0.30f, 1f),
         android.graphics.Shader.TileMode.CLAMP,
     )
-    canvas.drawRect(0f, 0f, f, f, paint)
-
-    // ③ 斜向高光：从左上一角扫过来的一道（0 → 32% → 100%）
-    //    轴取贴图的角到角：贴图被拉伸到卡片尺寸后，等价于原来卡片空间的"左上→右下"
-    paint.shader = android.graphics.LinearGradient(
-        0f, 0f, f, f,
-        intArrayOf(white(diagonalLight), 0, 0),
-        floatArrayOf(0f, 0.32f, 1f),
-        android.graphics.Shader.TileMode.CLAMP,
-    )
-    canvas.drawRect(0f, 0f, f, f, paint)
+    canvas.drawRect(0f, 0f, 1f, h.toFloat(), paint)
 
     return bmp.asImageBitmap()
 }

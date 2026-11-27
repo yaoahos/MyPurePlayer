@@ -11,6 +11,8 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import com.yaoahos.mypureplayer.ui.components.collectPressedWithTap
 import androidx.compose.foundation.horizontalScroll
@@ -292,6 +294,10 @@ fun PlayerSidePanel(
                 Modifier
                     .width(sideWidth)
                     .fillMaxHeight()
+                    // 面板自己吃掉落在它身上的点击。遮罩层的 clickable 就在下一层，
+                    // 面板不消费的话，点面板里的空白（标题旁、行与行之间、可滚动内容的间隙）
+                    // 会一路穿到遮罩上，把面板直接关掉 —— 手感是"点一下面板就没了"。
+                    .pointerInput(Unit) { detectTapGestures { } }
                     .clip(panelShape)
                     .background(glass.panelBrush)
                     .background(glass.panelSheen)
@@ -362,6 +368,8 @@ fun PlayerPopupCard(
                 Modifier
                     .width(width)
                     .fillMaxHeight()
+                    // 同侧栏：面板自己吃掉点击，否则点面板里的空白会穿到遮罩上直接关掉面板
+                    .pointerInput(Unit) { detectTapGestures { } }
                     .clip(panelShape)
                     .background(glass.panelBrush)
                     .background(glass.panelSheen)

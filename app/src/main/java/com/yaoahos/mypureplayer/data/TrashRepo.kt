@@ -198,7 +198,11 @@ class TrashRepo(
             // 旧版可见目录（`Android/media/<包名>/trash`）里的条目顺手搬进 `.trash`。
             // 只做同卷 rename，搬不动就留在原地，条目照样能用。
             val migrated = alive.map { migrateLegacyLocation(it, fileOf(it)) }
-            val all = (recoverOrphans(migrated) + migrated)
+            // 1.0.7 起回收站里不再有「文件夹」这一种条目：删除文件夹时逐个视频入库。
+            // 历史上落下的目录条目在这里就地拆成一条条视频记录（见 flattenFolders）。
+            // 拆出来的记录已经落在 `.trash` 根下，不需要再过一遍 legacy 迁移。
+            val flattened = flattenFolders(migrated)
+            val all = (recoverOrphans(flattened) + flattened)
                 .distinctBy { fileOf(it).absolutePath }
                 .sortedByDescending { it.deletedAt }
             ensureUniqueIds(all)
@@ -207,6 +211,94 @@ class TrashRepo(
         // 走 writeIndex 而不是直接 store.write：load 是页面进入时的第一跳，
         // 这里抛异常同样会闪退，而索引写不进去下次还能重建。
         if (merged != stored) writeIndex(merged) else _entries.value = merged
+    }
+
+    /**
+     * 把旧的「文件夹条目」拆成一条条视频记录。
+     *
+     * 删除文件夹的语义已经改成「文件夹里的视频逐个进回收站、各自记原路径」，
+     * 这样回收站列表只有视频、不用担心一条记录代表一堆文件；恢复时每个视频回到自己
+     * 原来所在的位置（原目录不存在会重建）。旧数据里的目录条目必须在这里展开，
+     * 否则升级之后回收站里还会冒出几个文件夹，跟新语义打架。
+     *
+     * 顺带把目录里的数据文件搬回 `.trash` 根下（同卷 rename，瞬间完成）：
+     * 目录一旦空了就删掉，回收站的落盘结构从此只有「一层扁平文件 + 各自的 meta」，
+     * 认领逻辑（[recoverOrphans]）不用再区分目录内外的条目。
+     */
+    private fun flattenFolders(list: List<TrashEntry>): List<TrashEntry> {
+        val out = mutableListOf<TrashEntry>()
+        list.forEach { entry ->
+            if (!entry.isFolder) {
+                out += entry
+                return@forEach
+            }
+            val bucket = fileOf(entry)
+            if (!bucket.isDirectory) {
+                // 目录不在：外置卡被拔掉时条目要留着（插回来还在），
+                // 内置存储上不存在就是真没了，交给 isReachable 那一步过滤。
+                if (volumeMissing(bucket)) out += entry
+                return@forEach
+            }
+            // listFiles 返回 null（权限不足、IO 抖动）与"目录里没有数据文件"长得一模一样，
+            // 但后果天差地别：前者按空目录删掉就是丢文件。读不到就整条保留，下次 load 再拆。
+            val listing = bucket.listFiles()
+            if (listing == null) {
+                out += entry
+                return@forEach
+            }
+            val files = listing.filter { it.isFile && it.extension.equals(DATA_SUFFIX, true) }
+            if (files.isEmpty()) {
+                // 确实没有数据文件：只清目录级索引，空壳才删 ——
+                // 不用 deleteRecursively，万一目录里还剩别的文件也不该被这次迁移抹掉
+                runCatching { File(bucket, FOLDER_META).delete() }
+                runCatching { if (bucket.listFiles().orEmpty().isEmpty()) bucket.delete() }
+                return@forEach
+            }
+            files.forEach { f ->
+                // 每个视频自己的 meta 里就是它最初的文件名与原路径，用它重建记录
+                val meta = readMeta(f)
+                val flat = migrateOutOf(f)
+                val id = nextId()
+                val record = TrashEntry(
+                    id = id,
+                    fileName = meta?.fileName?.takeIf { it.isNotBlank() } ?: "恢复的视频_$id",
+                    originalPath = meta?.originalPath.orEmpty(),
+                    originalFolderName = meta?.originalFolderName ?: entry.originalFolderName,
+                    sizeBytes = flat.length(),
+                    durationMs = meta?.durationMs ?: 0L,
+                    width = meta?.width ?: 0,
+                    height = meta?.height ?: 0,
+                    deletedAt = meta?.deletedAt?.takeIf { it > 0 }
+                        ?: flat.lastModified().takeIf { it > 0 }
+                        ?: entry.deletedAt,
+                    storedName = flat.absolutePath,
+                    isFolder = false,
+                    fileCount = 1,
+                )
+                writeMeta(record)
+                out += record
+            }
+            // 目录级索引没有用了；目录空了就删，别把空壳留在 .trash 里
+            runCatching { File(bucket, FOLDER_META).delete() }
+            runCatching { if (bucket.listFiles().orEmpty().isEmpty()) bucket.delete() }
+        }
+        return out
+    }
+
+    /**
+     * 把子目录里的数据文件搬回同卷的 `.trash` 根下。
+     *
+     * 搬不动（权限、被占用）就留在原处：条目指向的仍是那个文件，能播能还原，
+     * 只是回收站里多一个子目录。这种情况下它的 meta 还躺在旁边，认领逻辑靠
+     * [recoverOrphans] 里的 knownDirs 判断跳过它，不会重复认领。
+     */
+    private fun migrateOutOf(source: File): File {
+        val target = newDataFile(rootFor(source.absolutePath))
+        if (source.renameTo(target)) {
+            runCatching { metaOf(source).delete() }
+            return target
+        }
+        return source
     }
 
     /**
@@ -269,12 +361,17 @@ class TrashRepo(
      */
     private fun recoverOrphans(known: List<TrashEntry>): List<TrashEntry> {
         val knownPaths = known.mapTo(HashSet()) { fileOf(it).absolutePath }
+        // 条目所在的目录也算「已知」：旧文件夹条目的子目录被拆开之后，里面的文件
+        // 已经是独立条目了，扫描时不能再把它们按目录整体认领一遍（会生成重复记录、
+        // 而且新 id 排在前面会把原记录挤掉）。
+        val knownDirs = known.mapNotNullTo(HashSet()) { fileOf(it).parentFile?.absolutePath }
         val out = mutableListOf<TrashEntry>()
         recoverRoots().forEach { root ->
             root.listFiles().orEmpty().forEach entry@{ f ->
                 if (f.name == NOMEDIA || f.extension.equals(META_SUFFIX, true)) return@entry
                 if (f.absolutePath in knownPaths) return@entry
                 if (f.isDirectory) {
+                    if (f.absolutePath in knownDirs) return@entry
                     val meta = readMeta(f)
                     if (meta != null) {
                         out += meta.copy(storedName = f.absolutePath, isFolder = true)
@@ -456,7 +553,8 @@ class TrashRepo(
             val moved = mutableListOf<TrashEntry>()
             var firstError: String? = null
             items.forEach { item ->
-                moveOne(item, commit = false).fold(
+                // scan = false：整批搬完统一扫一次，逐个扫等于每个文件都发一次媒体库请求
+                moveOne(item, commit = false, scan = false).fold(
                     onSuccess = { moved += it },
                     onFailure = { if (firstError == null) firstError = it.message },
                 )
@@ -465,6 +563,9 @@ class TrashRepo(
                 // 新删除的排在最前，与单条删除的顺序保持一致
                 val next = moved.reversed() + _entries.value
                 writeIndex(next)
+                moved.mapNotNull { File(it.originalPath).parentFile?.absolutePath }
+                    .distinct()
+                    .forEach { FileOps.scan(context, it) }
             }
             MoveManyResult(moved, firstError)
         }
@@ -474,7 +575,11 @@ class TrashRepo(
     data class MoveManyResult(val moved: List<TrashEntry>, val firstError: String?)
 
     /** 单条搬运的实际逻辑；[commit] 为 false 时只搬文件、不落盘，由批量调用方统一写一次 */
-    private suspend fun moveOne(item: VideoItem, commit: Boolean = true): Result<TrashEntry> {
+    private suspend fun moveOne(
+        item: VideoItem,
+        commit: Boolean = true,
+        scan: Boolean = true,
+    ): Result<TrashEntry> {
         val path = item.localPath
             ?: return Result.failure(IllegalStateException("这个视频没有真实文件路径"))
         val source = File(path)
@@ -492,119 +597,54 @@ class TrashRepo(
             isFolder = false,
             fileCount = 1,
             commit = commit,
+            scan = scan,
         )
     }
 
     /**
      * 把**整个文件夹里的视频**移入回收站。
      *
-     * 语义是"一个文件夹 + 只搬视频"，不是"把原来的目录整体搬走"：
-     *  - 在回收站里建一个随机命名的目录，把**视频文件**逐个改名搬进去；
-     *  - 每个视频旁边写一份 `.meta`（记原名与原路径），目录内再放一份 `folder.meta` 记整条记录；
-     *  - 原目录里其它文件（字幕、封面、.nomedia、文档……）原地不动；
-     *  - 原目录搬空之后才删掉这个空目录，还剩文件就保留。
+     * 语义是「文件夹里的视频逐个进回收站、各自记自己的原路径」，不再为整个目录建一条
+     * 目录记录。这样回收站里看见的永远是视频本身，删掉一个二十集的目录就是二十条记录，
+     * 每条都能单独播放、单独还原、单独彻底删除；还原时每个视频回到它原来所在的位置，
+     * 原目录不在了会按需重建 —— 恢复出来的结果和不删时完全一致。
      *
-     * 为什么不能整目录 rename：一个"视频文件夹"里往往混着非视频文件，
-     * 整目录搬走等于把它们一起删了 —— 在回收站里还看不出来（只显示视频），
-     * 恢复时又整目录搬回来，用户很难意识到中间那段时间它们已经不在原处。
-     * 保险箱那边更严重：整目录加密会把字幕、图片一起吞掉。
+     * 早先的做法是在回收站里建一个随机目录把视频装进去、只留一条「文件夹」记录。
+     * 好处是一次恢复能整批放回，代价是回收站列表里混着两种东西：文件夹点不开、不能播，
+     * 选中的是文件夹时「播放」「详情」这些操作用不上，用户还得记住那条记录代表几个文件。
      *
-     * 恢复时反向操作：把这个目录里的视频按各自 meta 的原名逐个搬回原目录，
-     * 原目录不存在就重建；搬空之后回收站里的空目录一并清掉。
+     * 不整目录 rename 的理由没变：一个「视频文件夹」里往往混着字幕、封面、文档，
+     * 整目录搬走等于把它们一起删了。所以只搬视频，其它文件原地不动；
+     * 原目录搬空之后才删掉这个空目录。
      */
-    suspend fun moveFolderToTrash(
-        videos: List<VideoItem>,
-        sizeBytes: Long = 0L,
-    ): Result<TrashEntry> = withContext(Dispatchers.IO) {
+    suspend fun moveFolderToTrash(videos: List<VideoItem>): MoveManyResult = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val paths = videos.mapNotNull { it.localPath }.distinct()
-            val dir = paths.firstOrNull()?.let { File(it).parentFile }
-                ?: return@withLock Result.failure(IllegalStateException("没有找到文件夹位置"))
-            if (!dir.isDirectory) {
-                return@withLock Result.failure(IllegalStateException("文件夹已不存在"))
-            }
-            // 只认确实躺在这个目录里的文件。
-            // 这条记录恢复时会被整体放回 dir，如果混进了别的目录的文件，
-            // 恢复就会把它们搬到这个目录里 —— 等于悄悄改了文件的位置。
-            val members = paths.filter { File(it).parentFile?.absolutePath == dir.absolutePath }
-
-            val bucket = newDataFile(rootFor(dir.absolutePath))
-            if (!bucket.mkdirs() && !bucket.isDirectory) {
-                return@withLock Result.failure(IllegalStateException("没有写入权限，请开启「所有文件访问权限」"))
-            }
-
-            var moved = 0
-            var bytes = 0L
-            var failed = 0
-            members.forEach { p ->
-                val src = File(p)
-                // 期间被别处删掉/移走的直接跳过，不算失败
-                if (!src.isFile) return@forEach
-                val dest = newDataFile(bucket)
-                if (movePath(src, dest)) {
-                    // 每个视频各自一份 meta：文件夹整体还原时靠它还原原文件名，不依赖随机名
-                    writeMeta(
-                        TrashEntry(
-                            id = nextId(),
-                            fileName = src.name,
-                            originalPath = src.absolutePath,
-                            originalFolderName = dir.name,
-                            sizeBytes = dest.length(),
-                            deletedAt = System.currentTimeMillis(),
-                            storedName = dest.absolutePath,
-                            isFolder = false,
-                            fileCount = 1,
-                        ),
-                    )
-                    moved++
-                    bytes += dest.length()
-                } else {
-                    failed++
-                    runCatching {
-                        if (dest.exists()) dest.delete()
-                        metaOf(dest).delete()
-                    }
-                }
-            }
-
-            if (moved == 0) {
-                runCatching { bucket.deleteRecursively() }
-                return@withLock Result.failure(
-                    IllegalStateException("没有写入权限，请开启「所有文件访问权限」"),
+            val parents = videos.mapNotNull { it.localPath }
+                .mapNotNull { File(it).parentFile?.absolutePath }
+                .distinct()
+            val moved = mutableListOf<TrashEntry>()
+            var firstError: String? = null
+            videos.forEach { item ->
+                // scan = false：整批搬完统一扫一次目录，不然一百集就是一百次媒体库请求
+                moveOne(item, commit = false, scan = false).fold(
+                    onSuccess = { moved += it },
+                    onFailure = { if (firstError == null) firstError = it.message },
                 )
             }
-
+            if (moved.isNotEmpty()) {
+                // 新删除的排在最前，与单条删除的顺序保持一致
+                writeIndex(moved.reversed() + _entries.value)
+            }
             // 原目录搬空了才删；还留着非视频文件就原样保留
-            runCatching {
-                val left = dir.listFiles()
-                if (left != null && left.isEmpty()) dir.delete()
+            parents.forEach { p ->
+                runCatching {
+                    val dir = File(p)
+                    val left = dir.listFiles()
+                    if (left != null && left.isEmpty()) dir.delete()
+                }
+                FileOps.scan(context, p)
             }
-
-            if (failed > 0) {
-                // 只剩一部分，仍然要留下一条记录，否则没搬走的那些会"凭空消失"
-                android.util.Log.w("TrashRepo", "folder to trash: $failed files kept in place")
-            }
-
-            val entry = TrashEntry(
-                id = nextId(),
-                fileName = dir.name,
-                originalPath = dir.absolutePath,
-                originalFolderName = dir.name,
-                sizeBytes = if (bytes > 0L) bytes else sizeBytes,
-                durationMs = 0L,
-                width = 0,
-                height = 0,
-                deletedAt = System.currentTimeMillis(),
-                storedName = bucket.absolutePath,
-                isFolder = true,
-                fileCount = moved,
-            )
-            // 目录级 meta：trash.json 丢失时，靠它把整个文件夹重新认领回来
-            writeMeta(entry)
-            val next = listOf(entry) + _entries.value
-            writeIndex(next)
-            FileOps.scan(context, dir.absolutePath)
-            Result.success(entry)
+            MoveManyResult(moved, firstError)
         }
     }
 
@@ -621,6 +661,7 @@ class TrashRepo(
         isFolder: Boolean,
         fileCount: Int,
         commit: Boolean = true,
+        scan: Boolean = true,
     ): Result<TrashEntry> {
         // 目标目录按源文件所在的卷算，保证 rename 走的是同一挂载点（见 rootFor）
         val bucket = rootFor(source.absolutePath)
@@ -659,7 +700,7 @@ class TrashRepo(
             writeIndex(next)
         }
         // 通知媒体库原路径已失效
-        FileOps.scan(context, originalPath)
+        if (scan) FileOps.scan(context, originalPath)
         return Result.success(entry)
     }
 
@@ -671,40 +712,56 @@ class TrashRepo(
         }.getOrDefault(false)
     }
 
+    /** 批量恢复的结果：成功条数 + 失败明细（文件名 → 原因） */
+    data class RestoreManyResult(val restored: Int, val failures: List<Pair<String, String>>)
+
     /**
      * 恢复到原目录；同名文件已存在时自动改名。
      *
-     * 对外**只通过 Result 表达失败，绝不抛异常**。调用方是页面的 `scope.launch`，
+     * **只通过结果表达失败，绝不抛业务异常**。调用方是页面的 `scope.launch`，
      * 那里没有异常兜底，任何漏出来的异常都会把整个页面带走 —— 而恢复是「先搬文件、
      * 后写索引」，搬到一半出错时文件其实已经在原位了，用户看到的就是「恢复了，然后闪退」。
-     * 所以这里必须把所有意外都收敛成失败结果，让界面能准确告诉用户发生了什么。
+     * 所以每个失败分支都收敛成 [RestoreManyResult.failures] 里的一条，界面能准确说明原因。
+     *
+     * 必须在仓储层一次做完，不能让界面循环调用：每条单独恢复都要跑一遍
+     * [onRestored]，而它要等媒体库回调、重扫本地库、重写 history.json。
+     * 恢复「删掉的整个文件夹」时动辄几十条，逐条排队就是几十次串行等待 ——
+     * 删文件夹改成逐条入库之后，这个代价才浮出来（旧版一条文件夹记录只回写一次）。
+     *
+     * 每条只在自己那一小段持锁，回写历史统一放在锁外一次做完，
+     * 与 [moveManyToTrash] 的扫描合并是同一个道理。
      */
-    suspend fun restore(entry: TrashEntry): Result<String> {
-        val restored = mutableListOf<String>()
-        val result = try {
-            withContext(Dispatchers.IO) {
-                mutex.withLock { restoreLocked(entry, restored) }
+    suspend fun restoreMany(entries: List<TrashEntry>): RestoreManyResult {
+        if (entries.isEmpty()) return RestoreManyResult(0, emptyList())
+        val paths = mutableListOf<String>()
+        val failures = mutableListOf<Pair<String, String>>()
+        var ok = 0
+        withContext(Dispatchers.IO) {
+            entries.forEach { entry ->
+                val result = try {
+                    mutex.withLock { restoreLocked(entry, paths) }
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (t: Throwable) {
+                    android.util.Log.e("TrashRepo", "恢复失败：${entry.fileName}", t)
+                    Result.failure(IllegalStateException(t.message ?: "恢复失败，请重试"))
+                }
+                result.fold(
+                    onSuccess = { ok++ },
+                    onFailure = { failures += entry.fileName to (it.message ?: "恢复失败") },
+                )
             }
-        } catch (cancel: kotlinx.coroutines.CancellationException) {
-            // 页面被销毁导致的取消是正常流程，原样抛出；当成"恢复失败"提示是错的
-            throw cancel
-        } catch (t: Throwable) {
-            android.util.Log.e("TrashRepo", "恢复失败：${entry.fileName}", t)
-            Result.failure(IllegalStateException(t.message ?: "恢复失败，请重试"))
         }
-        // 回写历史必须在锁外：它要扫媒体库、写 history.json，占着回收站的锁会把
-        // 后续的删除/恢复排队等到它做完。
-        // 也不能让它影响结果：文件这时已经还原成功，历史写失败不该反过来报「恢复失败」。
-        if (restored.isNotEmpty()) {
+        if (paths.isNotEmpty()) {
             try {
-                onRestored(restored)
+                onRestored(paths)
             } catch (cancel: kotlinx.coroutines.CancellationException) {
                 throw cancel
             } catch (t: Throwable) {
                 android.util.Log.w("TrashRepo", "恢复后回写历史失败", t)
             }
         }
-        return result
+        return RestoreManyResult(ok, failures)
     }
 
     /** [restore] 的锁内实现：每个失败分支都走 Result，不留可抛出的业务异常 */

@@ -302,8 +302,10 @@ fun SettingsScreen(navController: NavHostController) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        // 纯值标签不留空格：与回收站角标「30天」保持同一口径。
+                        // 整句文案（下方「删除超过 N 天的视频」）仍按项目一贯的数字中文混排加空格。
                         Text(
-                            "${settings.trashRetentionDays} 天",
+                            "${settings.trashRetentionDays}天",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
@@ -398,7 +400,7 @@ fun SettingsScreen(navController: NavHostController) {
             ).forEach { (days, hint) ->
                 GlassChoiceRow(
                     icon = Icons.Rounded.DeleteSweep,
-                    title = "$days 天",
+                    title = "${days}天",
                     subtitle = hint,
                     selected = settings.trashRetentionDays == days,
                     onClick = {
